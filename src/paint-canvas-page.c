@@ -188,6 +188,8 @@ build_ui (PaintCanvasPage *self)
   adw_bin_set_child (ADW_BIN (self), GTK_WIDGET (self->overlay));
 
   self->scrolled = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
+  gtk_scrolled_window_set_propagate_natural_width (self->scrolled, FALSE);
+  gtk_scrolled_window_set_propagate_natural_height (self->scrolled, FALSE);
   gtk_widget_set_hexpand (GTK_WIDGET (self->scrolled), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self->scrolled), TRUE);
   gtk_widget_add_css_class (GTK_WIDGET (self->scrolled), "paint-workspace");
@@ -197,10 +199,10 @@ build_ui (PaintCanvasPage *self)
   gtk_widget_set_vexpand (container, TRUE);
   gtk_widget_set_halign (container, GTK_ALIGN_CENTER);
   gtk_widget_set_valign (container, GTK_ALIGN_CENTER);
-  gtk_widget_set_margin_top (container, 24);
-  gtk_widget_set_margin_bottom (container, 76);
-  gtk_widget_set_margin_start (container, 32);
-  gtk_widget_set_margin_end (container, 32);
+  gtk_widget_set_margin_top (container, 16);
+  gtk_widget_set_margin_bottom (container, 72);
+  gtk_widget_set_margin_start (container, 24);
+  gtk_widget_set_margin_end (container, 24);
   gtk_box_append (GTK_BOX (container), GTK_WIDGET (self->canvas));
 
   gtk_scrolled_window_set_child (self->scrolled, container);

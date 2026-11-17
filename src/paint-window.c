@@ -606,9 +606,9 @@ show_resize_dialog (PaintWindow *self)
 
   static const int PRESETS[][2] = {
     { PAINT_DEFAULT_CANVAS_WIDTH, PAINT_DEFAULT_CANVAS_HEIGHT },
+    { 800, 500 },
     { 1024, 1024 },
     { 1280, 720 },
-    { 1920, 1080 },
   };
   GtkWidget *presets = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
   gtk_widget_set_halign (presets, GTK_ALIGN_CENTER);
@@ -916,7 +916,7 @@ static GtkWidget *
 build_header_bar (PaintWindow *self)
 {
   GtkWidget *header = adw_header_bar_new ();
-  self->window_title = ADW_WINDOW_TITLE (adw_window_title_new ("Untitled Canvas", "800 × 500 · 100%"));
+  self->window_title = ADW_WINDOW_TITLE (adw_window_title_new ("Untitled Canvas", "640 × 380 · 100%"));
   adw_header_bar_set_title_widget (ADW_HEADER_BAR (header), GTK_WIDGET (self->window_title));
 
   /* Start: Open split button + New Tab button (Text Editor / Ptyxis style) */
@@ -1034,7 +1034,7 @@ paint_window_init (PaintWindow *self)
   load_recent_files (self);
 
   gtk_window_set_title (GTK_WINDOW (self), "Paint");
-  gtk_window_set_default_size (GTK_WINDOW (self), 910, 660);
+  gtk_window_set_default_size (GTK_WINDOW (self), 720, 520);
 
   g_action_map_add_action_entries (G_ACTION_MAP (self),
                                    win_actions,
