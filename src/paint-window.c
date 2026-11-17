@@ -1,5 +1,6 @@
 #include "paint-window.h"
 
+#include <glib/gstdio.h>
 #include <math.h>
 
 #include "paint-application.h"
@@ -449,10 +450,210 @@ on_discard_window_response (GObject *source, GAsyncResult *res, gpointer user_da
   }
 }
 
+static PaintPreferences *
+get_app_preferences (PaintWindow *self)
+{
+  GtkApplication *app = self ? gtk_window_get_application (GTK_WINDOW (self)) : NULL;
+  if (!app)
+    app = GTK_APPLICATION (g_application_get_default ());
+  if (app && PAINT_IS_APPLICATION (app))
+    return paint_application_get_preferences (PAINT_APPLICATION (app));
+  return NULL;
+}
+
+static char *
+session_dir_path (void)
+{
+  return g_build_filename (g_get_user_state_dir (), "paint", "session", NULL);
+}
+
+void
+paint_window_clear_session (void)
+{
+  g_autofree char *dir = session_dir_path ();
+  if (!g_file_test (dir, G_FILE_TEST_IS_DIR))
+    return;
+
+  GDir *d = g_dir_open (dir, 0, NULL);
+  if (d) {
+    const char *name;
+    while ((name = g_dir_read_name (d)) != NULL) {
+      g_autofree char *full = g_build_filename (dir, name, NULL);
+      g_unlink (full);
+    }
+    g_dir_close (d);
+  }
+}
+
+void
+paint_window_save_all_sessions (AdwApplication *app)
+{
+  paint_window_clear_session ();
+
+  g_autofree char *dir = session_dir_path ();
+  g_mkdir_with_parents (dir, 0755);
+
+  g_autoptr (GKeyFile) kf = g_key_file_new ();
+  int win_idx = 0;
+
+  for (GList *l = gtk_application_get_windows (GTK_APPLICATION (app)); l != NULL; l = l->next) {
+    if (!PAINT_IS_WINDOW (l->data))
+      continue;
+    PaintWindow *win = PAINT_WINDOW (l->data);
+    int n_pages = adw_tab_view_get_n_pages (win->tab_view);
+    if (n_pages == 0)
+      continue;
+
+    g_autofree char *win_grp = g_strdup_printf ("Window.%d", win_idx);
+    int w_width = gtk_widget_get_width (GTK_WIDGET (win));
+    int w_height = gtk_widget_get_height (GTK_WIDGET (win));
+    if (w_width > 0 && w_height > 0) {
+      g_key_file_set_integer (kf, win_grp, "Width", w_width);
+      g_key_file_set_integer (kf, win_grp, "Height", w_height);
+    }
+
+    AdwTabPage *selected = adw_tab_view_get_selected_page (win->tab_view);
+    int active_idx = 0;
+    int saved_tabs = 0;
+
+    for (int i = 0; i < n_pages; i++) {
+      AdwTabPage *tab = adw_tab_view_get_nth_page (win->tab_view, i);
+      GtkWidget *child = adw_tab_page_get_child (tab);
+      if (!PAINT_IS_CANVAS_PAGE (child))
+        continue;
+      if (tab == selected)
+        active_idx = saved_tabs;
+
+      PaintCanvasPage *page = PAINT_CANVAS_PAGE (child);
+      PaintCanvas *canvas = paint_canvas_page_get_canvas (page);
+      PaintDocument *doc = paint_canvas_get_document (canvas);
+
+      g_autofree char *tab_grp = g_strdup_printf ("Tab.%d.%d", win_idx, saved_tabs);
+      GFile *orig_file = paint_document_get_file (doc);
+      gboolean modified = paint_document_get_modified (doc);
+
+      if (orig_file) {
+        g_autofree char *orig_path = g_file_get_path (orig_file);
+        if (orig_path)
+          g_key_file_set_string (kf, tab_grp, "FilePath", orig_path);
+      }
+
+      if (modified || !orig_file) {
+        g_autofree char *draft_name = g_strdup_printf ("draft-%d-%d.png", win_idx, saved_tabs);
+        g_autofree char *draft_path = g_build_filename (dir, draft_name, NULL);
+        if (cairo_surface_write_to_png (paint_document_get_surface (doc), draft_path) == CAIRO_STATUS_SUCCESS)
+          g_key_file_set_string (kf, tab_grp, "DraftFile", draft_name);
+      }
+
+      g_key_file_set_boolean (kf, tab_grp, "Modified", modified);
+      g_key_file_set_double (kf, tab_grp, "Zoom", paint_canvas_get_zoom (canvas));
+      saved_tabs++;
+    }
+
+    g_key_file_set_integer (kf, win_grp, "TabCount", saved_tabs);
+    g_key_file_set_integer (kf, win_grp, "ActiveTab", active_idx);
+    win_idx++;
+  }
+
+  g_key_file_set_integer (kf, "Session", "WindowCount", win_idx);
+  g_autofree char *ini_path = g_build_filename (dir, "session.ini", NULL);
+  g_key_file_save_to_file (kf, ini_path, NULL);
+}
+
+gboolean
+paint_window_restore_session (AdwApplication *app)
+{
+  g_autofree char *dir = session_dir_path ();
+  g_autofree char *ini_path = g_build_filename (dir, "session.ini", NULL);
+  g_autoptr (GKeyFile) kf = g_key_file_new ();
+  if (!g_key_file_load_from_file (kf, ini_path, G_KEY_FILE_NONE, NULL))
+    return FALSE;
+
+  int win_count = g_key_file_get_integer (kf, "Session", "WindowCount", NULL);
+  if (win_count <= 0)
+    return FALSE;
+
+  gboolean restored_any = FALSE;
+  for (int w = 0; w < win_count; w++) {
+    g_autofree char *win_grp = g_strdup_printf ("Window.%d", w);
+    int tab_count = g_key_file_get_integer (kf, win_grp, "TabCount", NULL);
+    if (tab_count <= 0)
+      continue;
+
+    PaintWindow *win = paint_window_new_empty (app);
+    int win_w = g_key_file_get_integer (kf, win_grp, "Width", NULL);
+    int win_h = g_key_file_get_integer (kf, win_grp, "Height", NULL);
+    if (win_w > 200 && win_h > 200)
+      gtk_window_set_default_size (GTK_WINDOW (win), win_w, win_h);
+
+    for (int t = 0; t < tab_count; t++) {
+      g_autofree char *tab_grp = g_strdup_printf ("Tab.%d.%d", w, t);
+      g_autofree char *file_path = g_key_file_get_string (kf, tab_grp, "FilePath", NULL);
+      g_autofree char *draft_name = g_key_file_get_string (kf, tab_grp, "DraftFile", NULL);
+      gboolean modified = g_key_file_get_boolean (kf, tab_grp, "Modified", NULL);
+      double zoom = g_key_file_has_key (kf, tab_grp, "Zoom", NULL)
+                      ? g_key_file_get_double (kf, tab_grp, "Zoom", NULL)
+                      : 1.0;
+
+      g_autoptr (GFile) orig_file = file_path ? g_file_new_for_path (file_path) : NULL;
+      PaintDocument *doc = NULL;
+      if (draft_name) {
+        g_autofree char *draft_path = g_build_filename (dir, draft_name, NULL);
+        g_autoptr (GFile) draft_file = g_file_new_for_path (draft_path);
+        doc = paint_document_new_from_draft (draft_file, orig_file, modified, NULL);
+      } else if (orig_file && g_file_query_exists (orig_file, NULL)) {
+        doc = paint_document_new_from_file (orig_file, NULL);
+      }
+
+      if (doc) {
+        AdwTabPage *tab = paint_window_add_new_tab (win, doc);
+        GtkWidget *child = adw_tab_page_get_child (tab);
+        if (PAINT_IS_CANVAS_PAGE (child))
+          paint_canvas_set_zoom (paint_canvas_page_get_canvas (PAINT_CANVAS_PAGE (child)), zoom);
+      }
+    }
+
+    if (adw_tab_view_get_n_pages (win->tab_view) == 0) {
+      gtk_window_destroy (GTK_WINDOW (win));
+      continue;
+    }
+
+    int active = g_key_file_get_integer (kf, win_grp, "ActiveTab", NULL);
+    int n_pages = adw_tab_view_get_n_pages (win->tab_view);
+    if (active >= 0 && active < n_pages)
+      adw_tab_view_set_selected_page (win->tab_view,
+                                      adw_tab_view_get_nth_page (win->tab_view, active));
+    sync_window_state (win);
+    gtk_window_present (GTK_WINDOW (win));
+    restored_any = TRUE;
+  }
+
+  return restored_any;
+}
+
 static gboolean
 on_window_close_request (GtkWindow *window, gpointer user_data G_GNUC_UNUSED)
 {
   PaintWindow *self = PAINT_WINDOW (window);
+  GtkApplication *app = gtk_window_get_application (window);
+  PaintPreferences *prefs = get_app_preferences (self);
+
+  guint open_paint_windows = 0;
+  if (app) {
+    for (GList *l = gtk_application_get_windows (app); l != NULL; l = l->next) {
+      if (PAINT_IS_WINDOW (l->data))
+        open_paint_windows++;
+    }
+  }
+
+  if (prefs && prefs->restore_session && open_paint_windows <= 1) {
+    paint_window_save_all_sessions (ADW_APPLICATION (app));
+    return FALSE;
+  }
+
+  if (!prefs || !prefs->restore_session)
+    paint_window_clear_session ();
+
   int dirty = 0;
   int n = adw_tab_view_get_n_pages (self->tab_view);
   for (int i = 0; i < n; i++) {
@@ -1009,13 +1210,63 @@ on_page_state_changed (PaintCanvasPage *page G_GNUC_UNUSED, gpointer user_data)
   sync_window_state (PAINT_WINDOW (user_data));
 }
 
-static PaintPreferences *
-get_app_preferences (PaintWindow *self)
+static AdwTabView *
+on_tab_create_window (AdwTabView *view G_GNUC_UNUSED, gpointer user_data)
 {
+  PaintWindow *self = PAINT_WINDOW (user_data);
   GtkApplication *app = gtk_window_get_application (GTK_WINDOW (self));
-  if (app && PAINT_IS_APPLICATION (app))
-    return paint_application_get_preferences (PAINT_APPLICATION (app));
-  return NULL;
+  PaintWindow *new_win = paint_window_new_empty (ADW_APPLICATION (app));
+  gtk_window_present (GTK_WINDOW (new_win));
+  return new_win->tab_view;
+}
+
+static gboolean
+close_if_empty_after_detach_idle (gpointer user_data)
+{
+  PaintWindow *self = PAINT_WINDOW (user_data);
+  if (adw_tab_view_get_n_pages (self->tab_view) == 0 &&
+      !adw_tab_view_get_is_transferring_page (self->tab_view)) {
+    GtkApplication *app = gtk_window_get_application (GTK_WINDOW (self));
+    int other_windows = 0;
+    if (app) {
+      for (GList *l = gtk_application_get_windows (app); l != NULL; l = l->next) {
+        if (PAINT_IS_WINDOW (l->data) && l->data != self)
+          other_windows++;
+      }
+    }
+    if (other_windows > 0)
+      gtk_window_destroy (GTK_WINDOW (self));
+  }
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_tab_page_attached (AdwTabView *view G_GNUC_UNUSED,
+                      AdwTabPage *tab_page,
+                      gint position G_GNUC_UNUSED,
+                      gpointer user_data)
+{
+  PaintWindow *self = PAINT_WINDOW (user_data);
+  GtkWidget *child = adw_tab_page_get_child (tab_page);
+  if (PAINT_IS_CANVAS_PAGE (child)) {
+    g_signal_connect (child, "state-changed", G_CALLBACK (on_page_state_changed), self);
+    update_tab_metadata (tab_page, PAINT_CANVAS_PAGE (child));
+  }
+  sync_window_state (self);
+}
+
+static void
+on_tab_page_detached (AdwTabView *view G_GNUC_UNUSED,
+                      AdwTabPage *tab_page,
+                      gint position G_GNUC_UNUSED,
+                      gpointer user_data)
+{
+  PaintWindow *self = PAINT_WINDOW (user_data);
+  GtkWidget *child = adw_tab_page_get_child (tab_page);
+  if (PAINT_IS_CANVAS_PAGE (child))
+    g_signal_handlers_disconnect_by_func (child, G_CALLBACK (on_page_state_changed), self);
+  sync_window_state (self);
+  g_idle_add (close_if_empty_after_detach_idle, self);
 }
 
 void
@@ -1051,12 +1302,9 @@ paint_window_add_new_tab (PaintWindow *self, PaintDocument *doc)
                                        prefs->show_cursor_ring);
     paint_canvas_page_set_osd_visible (page, prefs->show_toolbar);
   }
-  g_signal_connect (page, "state-changed", G_CALLBACK (on_page_state_changed), self);
 
   AdwTabPage *tab = adw_tab_view_append (self->tab_view, GTK_WIDGET (page));
-  update_tab_metadata (tab, page);
   adw_tab_view_set_selected_page (self->tab_view, tab);
-  sync_window_state (self);
   return tab;
 }
 
@@ -1064,7 +1312,6 @@ static void
 paint_window_finalize (GObject *object)
 {
   PaintWindow *self = PAINT_WINDOW (object);
-  g_clear_pointer (&self->shared_settings, paint_tool_settings_free);
   g_clear_pointer (&self->recent_paths, g_ptr_array_unref);
   G_OBJECT_CLASS (paint_window_parent_class)->finalize (object);
 }
@@ -1102,7 +1349,10 @@ paint_window_init (PaintWindow *self)
     { "brush-larger", act_brush_larger, NULL, NULL, NULL, { 0 } },
   };
 
-  self->shared_settings = paint_tool_settings_new ();
+  GApplication *app = g_application_get_default ();
+  self->shared_settings = (app && PAINT_IS_APPLICATION (app))
+                            ? paint_application_get_tool_settings (PAINT_APPLICATION (app))
+                            : paint_tool_settings_new ();
   self->recent_paths = g_ptr_array_new_with_free_func (g_free);
   load_recent_files (self);
 
@@ -1121,6 +1371,9 @@ paint_window_init (PaintWindow *self)
   self->tab_view = ADW_TAB_VIEW (adw_tab_view_new ());
   g_signal_connect (self->tab_view, "notify::selected-page", G_CALLBACK (on_selected_page_changed), self);
   g_signal_connect (self->tab_view, "close-page", G_CALLBACK (on_close_page), self);
+  g_signal_connect (self->tab_view, "create-window", G_CALLBACK (on_tab_create_window), self);
+  g_signal_connect (self->tab_view, "page-attached", G_CALLBACK (on_tab_page_attached), self);
+  g_signal_connect (self->tab_view, "page-detached", G_CALLBACK (on_tab_page_detached), self);
 
   GtkWidget *toolbar_view = adw_toolbar_view_new ();
   adw_toolbar_view_set_top_bar_style (ADW_TOOLBAR_VIEW (toolbar_view), ADW_TOOLBAR_RAISED_BORDER);
@@ -1145,12 +1398,21 @@ paint_window_init (PaintWindow *self)
 }
 
 PaintWindow *
+paint_window_new_empty (AdwApplication *app)
+{
+  return g_object_new (PAINT_TYPE_WINDOW, "application", app, NULL);
+}
+
+PaintWindow *
 paint_window_new (AdwApplication *app)
 {
-  PaintWindow *self = g_object_new (PAINT_TYPE_WINDOW, "application", app, NULL);
-  PaintPreferences *prefs = get_app_preferences (self);
-  if (prefs)
-    self->shared_settings->size = prefs->default_brush_size;
+  PaintWindow *self = paint_window_new_empty (app);
   paint_window_add_new_tab (self, NULL);
   return self;
+}
+
+AdwTabView *
+paint_window_get_tab_view (PaintWindow *self)
+{
+  return self->tab_view;
 }

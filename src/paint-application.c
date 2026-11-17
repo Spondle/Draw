@@ -6,6 +6,7 @@ struct _PaintApplication {
   AdwApplication parent_instance;
 
   PaintPreferences *preferences;
+  PaintToolSettings *tool_settings;
 };
 
 G_DEFINE_FINAL_TYPE (PaintApplication, paint_application, ADW_TYPE_APPLICATION)
@@ -98,7 +99,12 @@ act_quit (GSimpleAction *action G_GNUC_UNUSED,
           GVariant *param G_GNUC_UNUSED,
           gpointer user_data)
 {
-  g_application_quit (G_APPLICATION (user_data));
+  PaintApplication *self = PAINT_APPLICATION (user_data);
+  if (self->preferences && self->preferences->restore_session)
+    paint_window_save_all_sessions (ADW_APPLICATION (self));
+  else
+    paint_window_clear_session ();
+  g_application_quit (G_APPLICATION (self));
 }
 
 static void
@@ -109,6 +115,8 @@ paint_application_startup (GApplication *app)
   PaintApplication *self = PAINT_APPLICATION (app);
   self->preferences = paint_preferences_load ();
   paint_preferences_apply_theme (self->preferences);
+  self->tool_settings = paint_tool_settings_new ();
+  self->tool_settings->size = self->preferences->default_brush_size;
 
   GdkDisplay *display = gdk_display_get_default ();
   if (display) {
@@ -163,9 +171,15 @@ paint_application_startup (GApplication *app)
 static void
 paint_application_activate (GApplication *app)
 {
+  PaintApplication *self = PAINT_APPLICATION (app);
   GtkWindow *win = gtk_application_get_active_window (GTK_APPLICATION (app));
-  if (!win)
+  if (!win) {
+    if (self->preferences && self->preferences->restore_session &&
+        paint_window_restore_session (ADW_APPLICATION (app))) {
+      return;
+    }
     win = GTK_WINDOW (paint_window_new (ADW_APPLICATION (app)));
+  }
   gtk_window_present (win);
 }
 
@@ -190,6 +204,7 @@ paint_application_finalize (GObject *object)
 {
   PaintApplication *self = PAINT_APPLICATION (object);
   g_clear_pointer (&self->preferences, paint_preferences_free);
+  g_clear_pointer (&self->tool_settings, paint_tool_settings_free);
   G_OBJECT_CLASS (paint_application_parent_class)->finalize (object);
 }
 
@@ -223,4 +238,10 @@ PaintPreferences *
 paint_application_get_preferences (PaintApplication *self)
 {
   return self->preferences;
+}
+
+PaintToolSettings *
+paint_application_get_tool_settings (PaintApplication *self)
+{
+  return self->tool_settings;
 }

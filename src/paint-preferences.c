@@ -20,6 +20,7 @@ paint_preferences_load (void)
   prefs->default_brush_size = 6.0;
   prefs->show_cursor_ring = TRUE;
   prefs->show_toolbar = TRUE;
+  prefs->restore_session = TRUE;
 
   g_autofree char *path = preferences_file_path ();
   g_autoptr (GKeyFile) kf = g_key_file_new ();
@@ -34,6 +35,8 @@ paint_preferences_load (void)
     prefs->show_cursor_ring = g_key_file_get_boolean (kf, "Appearance", "ShowCursorRing", NULL);
   if (g_key_file_has_key (kf, "Appearance", "ShowToolbar", NULL))
     prefs->show_toolbar = g_key_file_get_boolean (kf, "Appearance", "ShowToolbar", NULL);
+  if (g_key_file_has_key (kf, "Behavior", "RestoreSession", NULL))
+    prefs->restore_session = g_key_file_get_boolean (kf, "Behavior", "RestoreSession", NULL);
 
   if (g_key_file_has_key (kf, "Canvas", "DefaultWidth", NULL))
     prefs->default_width = CLAMP (g_key_file_get_integer (kf, "Canvas", "DefaultWidth", NULL), 64, 8192);
@@ -59,6 +62,7 @@ paint_preferences_save (const PaintPreferences *prefs)
   g_key_file_set_integer (kf, "Appearance", "ColorScheme", prefs->color_scheme);
   g_key_file_set_boolean (kf, "Appearance", "ShowCursorRing", prefs->show_cursor_ring);
   g_key_file_set_boolean (kf, "Appearance", "ShowToolbar", prefs->show_toolbar);
+  g_key_file_set_boolean (kf, "Behavior", "RestoreSession", prefs->restore_session);
   g_key_file_set_integer (kf, "Canvas", "DefaultWidth", prefs->default_width);
   g_key_file_set_integer (kf, "Canvas", "DefaultHeight", prefs->default_height);
   g_key_file_set_double (kf, "Canvas", "DefaultBrushSize", prefs->default_brush_size);
@@ -238,6 +242,14 @@ on_toolbar_toggled (GObject *obj, GParamSpec *pspec G_GNUC_UNUSED, gpointer user
 }
 
 static void
+on_restore_session_toggled (GObject *obj, GParamSpec *pspec G_GNUC_UNUSED, gpointer user_data)
+{
+  PrefsDialogCtx *ctx = user_data;
+  ctx->prefs->restore_session = adw_switch_row_get_active (ADW_SWITCH_ROW (obj));
+  notify_changed (ctx);
+}
+
+static void
 on_default_width_changed (GObject *obj, GParamSpec *pspec G_GNUC_UNUSED, gpointer user_data)
 {
   PrefsDialogCtx *ctx = user_data;
@@ -284,12 +296,6 @@ paint_preferences_dialog_present (PaintPreferences *prefs,
   GtkWidget *appearance_grp = adw_preferences_group_new ();
   adw_preferences_group_set_title (ADW_PREFERENCES_GROUP (appearance_grp), "Appearance");
 
-  GtkWidget *scheme_row = adw_action_row_new ();
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (scheme_row), "Color Scheme");
-  adw_action_row_add_suffix (ADW_ACTION_ROW (scheme_row),
-                             paint_theme_selector_new (prefs, on_changed, user_data));
-  adw_preferences_group_add (ADW_PREFERENCES_GROUP (appearance_grp), scheme_row);
-
   GtkWidget *cursor_row = adw_switch_row_new ();
   adw_preferences_row_set_title (ADW_PREFERENCES_ROW (cursor_row), "Brush Cursor Ring");
   adw_action_row_set_subtitle (ADW_ACTION_ROW (cursor_row),
@@ -307,6 +313,20 @@ paint_preferences_dialog_present (PaintPreferences *prefs,
   adw_preferences_group_add (ADW_PREFERENCES_GROUP (appearance_grp), toolbar_row);
 
   adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), ADW_PREFERENCES_GROUP (appearance_grp));
+
+  /* Behavior group */
+  GtkWidget *behavior_grp = adw_preferences_group_new ();
+  adw_preferences_group_set_title (ADW_PREFERENCES_GROUP (behavior_grp), "Behavior");
+
+  GtkWidget *restore_row = adw_switch_row_new ();
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (restore_row), "Restore Session");
+  adw_action_row_set_subtitle (ADW_ACTION_ROW (restore_row),
+                               "Reopen open canvases and unsaved drafts on startup");
+  adw_switch_row_set_active (ADW_SWITCH_ROW (restore_row), prefs->restore_session);
+  g_signal_connect (restore_row, "notify::active", G_CALLBACK (on_restore_session_toggled), ctx);
+  adw_preferences_group_add (ADW_PREFERENCES_GROUP (behavior_grp), restore_row);
+
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), ADW_PREFERENCES_GROUP (behavior_grp));
 
   /* New Canvas Defaults group */
   GtkWidget *canvas_grp = adw_preferences_group_new ();

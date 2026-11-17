@@ -175,6 +175,20 @@ paint_document_new_from_file (GFile *file, GError **error)
   return doc;
 }
 
+PaintDocument *
+paint_document_new_from_draft (GFile *draft_file,
+                               GFile *original_file,
+                               gboolean modified,
+                               GError **error)
+{
+  PaintDocument *doc = paint_document_new_from_file (draft_file, error);
+  if (!doc)
+    return NULL;
+  g_set_object (&doc->file, original_file);
+  doc->modified = modified;
+  return doc;
+}
+
 void
 paint_document_free (PaintDocument *doc)
 {

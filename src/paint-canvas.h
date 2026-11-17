@@ -14,6 +14,10 @@ typedef struct _PaintDocument PaintDocument;
 
 PaintDocument *paint_document_new (int width, int height);
 PaintDocument *paint_document_new_from_file (GFile *file, GError **error);
+PaintDocument *paint_document_new_from_draft (GFile *draft_file,
+                                              GFile *original_file,
+                                              gboolean modified,
+                                              GError **error);
 void paint_document_free (PaintDocument *doc);
 
 int paint_document_get_width (const PaintDocument *doc);

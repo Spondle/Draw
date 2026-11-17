@@ -17,6 +17,7 @@ typedef struct {
   double default_brush_size;
   gboolean show_cursor_ring;
   gboolean show_toolbar;
+  gboolean restore_session;
 } PaintPreferences;
 
 PaintPreferences *paint_preferences_load (void);
