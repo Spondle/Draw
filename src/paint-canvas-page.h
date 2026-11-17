@@ -17,6 +17,7 @@ void paint_canvas_page_select_tool (PaintCanvasPage *self, const char *tool_id);
 void paint_canvas_page_set_brush_size (PaintCanvasPage *self, double size);
 void paint_canvas_page_adjust_brush_size (PaintCanvasPage *self, double delta);
 void paint_canvas_page_toggle_osd (PaintCanvasPage *self);
+void paint_canvas_page_set_osd_visible (PaintCanvasPage *self, gboolean visible);
 void paint_canvas_page_sync_controls (PaintCanvasPage *self);
 
 char *paint_canvas_page_dup_title (PaintCanvasPage *self);

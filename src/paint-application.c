@@ -4,9 +4,34 @@
 
 struct _PaintApplication {
   AdwApplication parent_instance;
+
+  PaintPreferences *preferences;
 };
 
 G_DEFINE_FINAL_TYPE (PaintApplication, paint_application, ADW_TYPE_APPLICATION)
+
+static void
+on_preferences_changed (const PaintPreferences *prefs G_GNUC_UNUSED, gpointer user_data)
+{
+  GtkApplication *app = GTK_APPLICATION (user_data);
+  for (GList *l = gtk_application_get_windows (app); l != NULL; l = l->next) {
+    if (PAINT_IS_WINDOW (l->data))
+      paint_window_apply_preferences (PAINT_WINDOW (l->data));
+  }
+}
+
+static void
+act_preferences (GSimpleAction *action G_GNUC_UNUSED,
+                 GVariant *param G_GNUC_UNUSED,
+                 gpointer user_data)
+{
+  PaintApplication *self = PAINT_APPLICATION (user_data);
+  GtkWindow *active = gtk_application_get_active_window (GTK_APPLICATION (self));
+  paint_preferences_dialog_present (self->preferences,
+                                    GTK_WIDGET (active),
+                                    on_preferences_changed,
+                                    self);
+}
 
 static void
 act_new_window (GSimpleAction *action G_GNUC_UNUSED,
@@ -60,7 +85,9 @@ act_shortcuts (GSimpleAction *action G_GNUC_UNUSED,
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Eraser Tool", "e"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Decrease / Increase Brush Size", "bracketleft bracketright"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Zoom In / Out / Reset", "<Control>plus <Control>minus <Control>0"));
+  adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Fullscreen", "F11"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Toggle Floating Toolbar", "F9"));
+  adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Preferences", "<Control>comma"));
   adw_shortcuts_dialog_add (ADW_SHORTCUTS_DIALOG (dlg), draw_sec);
 
   adw_dialog_present (dlg, GTK_WIDGET (gtk_application_get_active_window (app)));
@@ -79,6 +106,10 @@ paint_application_startup (GApplication *app)
 {
   G_APPLICATION_CLASS (paint_application_parent_class)->startup (app);
 
+  PaintApplication *self = PAINT_APPLICATION (app);
+  self->preferences = paint_preferences_load ();
+  paint_preferences_apply_theme (self->preferences);
+
   GdkDisplay *display = gdk_display_get_default ();
   if (display) {
     g_autoptr (GtkCssProvider) provider = gtk_css_provider_new ();
@@ -90,6 +121,7 @@ paint_application_startup (GApplication *app)
 
   static const GActionEntry app_actions[] = {
     { "new-window", act_new_window, NULL, NULL, NULL, { 0 } },
+    { "preferences", act_preferences, NULL, NULL, NULL, { 0 } },
     { "about", act_about, NULL, NULL, NULL, { 0 } },
     { "shortcuts", act_shortcuts, NULL, NULL, NULL, { 0 } },
     { "quit", act_quit, NULL, NULL, NULL, { 0 } },
@@ -104,6 +136,7 @@ paint_application_startup (GApplication *app)
     const char *accels[4];
   } accel_map[] = {
     { "app.new-window", { "<Primary><Shift>n", NULL } },
+    { "app.preferences", { "<Primary>comma", NULL } },
     { "app.shortcuts", { "<Primary>question", NULL } },
     { "app.quit", { "<Primary>q", NULL } },
     { "win.new-tab", { "<Primary>n", "<Primary>t", NULL } },
@@ -118,6 +151,7 @@ paint_application_startup (GApplication *app)
     { "win.zoom-reset", { "<Primary>0", "<Primary>KP_0", NULL } },
     { "win.tab-overview", { "<Primary><Shift>o", NULL } },
     { "win.toggle-toolbar", { "F9", NULL } },
+    { "win.toggle-fullscreen", { "F11", NULL } },
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (accel_map); i++)
@@ -152,8 +186,19 @@ paint_application_open (GApplication *app,
 }
 
 static void
+paint_application_finalize (GObject *object)
+{
+  PaintApplication *self = PAINT_APPLICATION (object);
+  g_clear_pointer (&self->preferences, paint_preferences_free);
+  G_OBJECT_CLASS (paint_application_parent_class)->finalize (object);
+}
+
+static void
 paint_application_class_init (PaintApplicationClass *klass)
 {
+  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+  object_class->finalize = paint_application_finalize;
+
   GApplicationClass *app_class = G_APPLICATION_CLASS (klass);
   app_class->startup = paint_application_startup;
   app_class->activate = paint_application_activate;
@@ -172,4 +217,10 @@ paint_application_new (void)
                        "application-id", PAINT_APP_ID,
                        "flags", G_APPLICATION_HANDLES_OPEN,
                        NULL);
+}
+
+PaintPreferences *
+paint_application_get_preferences (PaintApplication *self)
+{
+  return self->preferences;
 }

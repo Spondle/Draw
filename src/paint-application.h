@@ -2,6 +2,8 @@
 
 #include <adwaita.h>
 
+#include "paint-preferences.h"
+
 G_BEGIN_DECLS
 
 #define PAINT_APP_ID "io.github.spondle.Paint"
@@ -12,5 +14,6 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (PaintApplication, paint_application, PAINT, APPLICATION, AdwApplication)
 
 PaintApplication *paint_application_new (void);
+PaintPreferences *paint_application_get_preferences (PaintApplication *self);
 
 G_END_DECLS

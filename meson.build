@@ -28,6 +28,7 @@ app_sources = core_sources + files(
   'src/paint-application.c',
   'src/paint-window.c',
   'src/paint-canvas-page.c',
+  'src/paint-preferences.c',
 ) + [resources]
 
 executable('paint',

@@ -374,6 +374,12 @@ paint_canvas_page_toggle_osd (PaintCanvasPage *self)
 }
 
 void
+paint_canvas_page_set_osd_visible (PaintCanvasPage *self, gboolean visible)
+{
+  gtk_widget_set_visible (self->osd_pill, visible);
+}
+
+void
 paint_canvas_page_sync_controls (PaintCanvasPage *self)
 {
   PaintDocument *doc = paint_canvas_get_document (self->canvas);

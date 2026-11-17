@@ -445,6 +445,7 @@ struct _PaintCanvas {
   gboolean drawing_active;
   double drag_start_x;
   double drag_start_y;
+  gboolean show_cursor_ring;
 };
 
 G_DEFINE_FINAL_TYPE (PaintCanvas, paint_canvas, GTK_TYPE_DRAWING_AREA)
@@ -479,7 +480,7 @@ on_draw (GtkDrawingArea *area,
   cairo_paint (cr);
   cairo_restore (cr);
 
-  if (self->has_hover && self->settings) {
+  if (self->show_cursor_ring && self->has_hover && self->settings) {
     double px = self->hover_x * self->zoom;
     double py = self->hover_y * self->zoom;
     double radius = MAX (2.0, (self->settings->size * self->zoom) / 2.0);
@@ -626,6 +627,7 @@ static void
 paint_canvas_init (PaintCanvas *self)
 {
   self->zoom = 1.0;
+  self->show_cursor_ring = TRUE;
 
   gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-frame");
   gtk_widget_set_halign (GTK_WIDGET (self), GTK_ALIGN_CENTER);
@@ -767,4 +769,11 @@ paint_canvas_resize (PaintCanvas *self, int width, int height)
   update_size_request (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+}
+
+void
+paint_canvas_set_show_cursor_ring (PaintCanvas *self, gboolean show)
+{
+  self->show_cursor_ring = show;
+  gtk_widget_queue_draw (GTK_WIDGET (self));
 }

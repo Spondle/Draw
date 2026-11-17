@@ -67,5 +67,6 @@ gboolean paint_canvas_undo (PaintCanvas *self);
 gboolean paint_canvas_redo (PaintCanvas *self);
 void paint_canvas_clear (PaintCanvas *self);
 void paint_canvas_resize (PaintCanvas *self, int width, int height);
+void paint_canvas_set_show_cursor_ring (PaintCanvas *self, gboolean show);
 
 G_END_DECLS

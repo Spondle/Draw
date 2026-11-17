@@ -2,7 +2,9 @@
 
 #include <math.h>
 
+#include "paint-application.h"
 #include "paint-canvas-page.h"
+#include "paint-preferences.h"
 #include "paint-tools.h"
 
 #define MAX_RECENT_FILES 8
@@ -722,6 +724,15 @@ static void act_toggle_toolbar (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GN
     paint_canvas_page_toggle_osd (page);
 }
 
+static void act_toggle_fullscreen (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UNUSED, gpointer d)
+{
+  GtkWindow *win = GTK_WINDOW (d);
+  if (gtk_window_is_fullscreen (win))
+    gtk_window_unfullscreen (win);
+  else
+    gtk_window_fullscreen (win);
+}
+
 static void act_tab_overview (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UNUSED, gpointer d)
 {
   PaintWindow *self = PAINT_WINDOW (d);
@@ -771,6 +782,10 @@ on_key_pressed (GtkEventControllerKey *ctrl G_GNUC_UNUSED,
   if (focus && (GTK_IS_EDITABLE (focus) || GTK_IS_TEXT (focus)))
     return FALSE;
 
+  if (keyval == GDK_KEY_Escape && gtk_window_is_fullscreen (GTK_WINDOW (self))) {
+    gtk_window_unfullscreen (GTK_WINDOW (self));
+    return TRUE;
+  }
   if (keyval == GDK_KEY_b || keyval == GDK_KEY_B) {
     gtk_widget_activate_action (GTK_WIDGET (self), "win.tool-brush", NULL);
     return TRUE;
@@ -846,10 +861,12 @@ build_primary_menu (PaintWindow *self)
   g_autoptr (GMenu) canvas_section = g_menu_new ();
   g_menu_append (canvas_section, "Resize Canvas…", "win.resize-canvas");
   g_menu_append (canvas_section, "Clear Canvas", "win.clear");
+  g_menu_append (canvas_section, "Fullscreen", "win.toggle-fullscreen");
   g_menu_append (canvas_section, "Toggle Toolbar", "win.toggle-toolbar");
   g_menu_append_section (menu, NULL, G_MENU_MODEL (canvas_section));
 
   g_autoptr (GMenu) app_section = g_menu_new ();
+  g_menu_append (app_section, "Preferences", "app.preferences");
   g_menu_append (app_section, "Keyboard Shortcuts", "app.shortcuts");
   g_menu_append (app_section, "About Paint", "app.about");
   g_menu_append_section (menu, NULL, G_MENU_MODEL (app_section));
@@ -975,10 +992,48 @@ on_page_state_changed (PaintCanvasPage *page G_GNUC_UNUSED, gpointer user_data)
   sync_window_state (PAINT_WINDOW (user_data));
 }
 
+static PaintPreferences *
+get_app_preferences (PaintWindow *self)
+{
+  GtkApplication *app = gtk_window_get_application (GTK_WINDOW (self));
+  if (app && PAINT_IS_APPLICATION (app))
+    return paint_application_get_preferences (PAINT_APPLICATION (app));
+  return NULL;
+}
+
+void
+paint_window_apply_preferences (PaintWindow *self)
+{
+  PaintPreferences *prefs = get_app_preferences (self);
+  if (!prefs)
+    return;
+
+  int n = adw_tab_view_get_n_pages (self->tab_view);
+  for (int i = 0; i < n; i++) {
+    AdwTabPage *tab = adw_tab_view_get_nth_page (self->tab_view, i);
+    GtkWidget *child = adw_tab_page_get_child (tab);
+    if (PAINT_IS_CANVAS_PAGE (child)) {
+      PaintCanvasPage *page = PAINT_CANVAS_PAGE (child);
+      paint_canvas_set_show_cursor_ring (paint_canvas_page_get_canvas (page),
+                                         prefs->show_cursor_ring);
+      paint_canvas_page_set_osd_visible (page, prefs->show_toolbar);
+    }
+  }
+}
+
 AdwTabPage *
 paint_window_add_new_tab (PaintWindow *self, PaintDocument *doc)
 {
+  PaintPreferences *prefs = get_app_preferences (self);
+  if (!doc && prefs)
+    doc = paint_document_new (prefs->default_width, prefs->default_height);
+
   PaintCanvasPage *page = paint_canvas_page_new (doc, self->shared_settings);
+  if (prefs) {
+    paint_canvas_set_show_cursor_ring (paint_canvas_page_get_canvas (page),
+                                       prefs->show_cursor_ring);
+    paint_canvas_page_set_osd_visible (page, prefs->show_toolbar);
+  }
   g_signal_connect (page, "state-changed", G_CALLBACK (on_page_state_changed), self);
 
   AdwTabPage *tab = adw_tab_view_append (self->tab_view, GTK_WIDGET (page));
@@ -1022,6 +1077,7 @@ paint_window_init (PaintWindow *self)
     { "zoom-out", act_zoom_out, NULL, NULL, NULL, { 0 } },
     { "zoom-reset", act_zoom_reset, NULL, NULL, NULL, { 0 } },
     { "toggle-toolbar", act_toggle_toolbar, NULL, NULL, NULL, { 0 } },
+    { "toggle-fullscreen", act_toggle_fullscreen, NULL, NULL, NULL, { 0 } },
     { "tab-overview", act_tab_overview, NULL, NULL, NULL, { 0 } },
     { "tool-brush", act_tool_brush, NULL, NULL, NULL, { 0 } },
     { "tool-eraser", act_tool_eraser, NULL, NULL, NULL, { 0 } },
@@ -1069,12 +1125,15 @@ paint_window_init (PaintWindow *self)
 
   adw_application_window_set_content (ADW_APPLICATION_WINDOW (self), GTK_WIDGET (self->tab_overview));
   g_signal_connect (self, "close-request", G_CALLBACK (on_window_close_request), NULL);
-
-  paint_window_add_new_tab (self, NULL);
 }
 
 PaintWindow *
 paint_window_new (AdwApplication *app)
 {
-  return g_object_new (PAINT_TYPE_WINDOW, "application", app, NULL);
+  PaintWindow *self = g_object_new (PAINT_TYPE_WINDOW, "application", app, NULL);
+  PaintPreferences *prefs = get_app_preferences (self);
+  if (prefs)
+    self->shared_settings->size = prefs->default_brush_size;
+  paint_window_add_new_tab (self, NULL);
+  return self;
 }
