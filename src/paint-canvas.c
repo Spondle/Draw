@@ -499,12 +499,13 @@ on_draw (GtkDrawingArea *area,
 }
 
 static void
-on_drag_begin (GtkGestureDrag *gesture G_GNUC_UNUSED,
+on_drag_begin (GtkGestureDrag *gesture,
                double start_x,
                double start_y,
                gpointer user_data)
 {
   PaintCanvas *self = PAINT_CANVAS (user_data);
+  gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
   gtk_widget_grab_focus (GTK_WIDGET (self));
   self->drawing_active = TRUE;
   self->drag_start_x = start_x;
@@ -561,6 +562,17 @@ on_drag_end (GtkGestureDrag *gesture G_GNUC_UNUSED,
   paint_document_end_stroke (self->document, cx, cy, tool, self->settings);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+}
+
+static void
+on_drag_cancel (GtkGesture *gesture G_GNUC_UNUSED,
+                GdkEventSequence *sequence G_GNUC_UNUSED,
+                gpointer user_data)
+{
+  PaintCanvas *self = PAINT_CANVAS (user_data);
+  self->drawing_active = FALSE;
+  if (self->settings && self->settings->history_points)
+    g_array_set_size (self->settings->history_points, 0);
 }
 
 static void
@@ -626,6 +638,7 @@ paint_canvas_init (PaintCanvas *self)
   g_signal_connect (drag, "drag-begin", G_CALLBACK (on_drag_begin), self);
   g_signal_connect (drag, "drag-update", G_CALLBACK (on_drag_update), self);
   g_signal_connect (drag, "drag-end", G_CALLBACK (on_drag_end), self);
+  g_signal_connect (drag, "cancel", G_CALLBACK (on_drag_cancel), self);
   gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (drag));
 
   GtkEventController *motion = gtk_event_controller_motion_new ();

@@ -188,6 +188,7 @@ build_ui (PaintCanvasPage *self)
   adw_bin_set_child (ADW_BIN (self), GTK_WIDGET (self->overlay));
 
   self->scrolled = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
+  gtk_scrolled_window_set_kinetic_scrolling (self->scrolled, FALSE);
   gtk_scrolled_window_set_propagate_natural_width (self->scrolled, FALSE);
   gtk_scrolled_window_set_propagate_natural_height (self->scrolled, FALSE);
   gtk_widget_set_hexpand (GTK_WIDGET (self->scrolled), TRUE);
