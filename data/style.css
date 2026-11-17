@@ -1,0 +1,67 @@
+/* GNOME Paint - Adwaita-native styling */
+
+.paint-workspace {
+    background-color: color-mix(in srgb, var(--window-bg-color) 88%, black 12%);
+}
+
+.paint-canvas-frame {
+    background-color: #ffffff;
+    box-shadow:
+        0 2px 8px rgba(0, 0, 0, 0.22),
+        0 12px 32px rgba(0, 0, 0, 0.16),
+        0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+.paint-osd-pill {
+    background-color: color-mix(in srgb, var(--headerbar-bg-color) 92%, transparent);
+    color: var(--headerbar-fg-color);
+    border-radius: 9999px;
+    padding: 5px 10px;
+    box-shadow:
+        0 2px 10px rgba(0, 0, 0, 0.25),
+        0 0 0 1px color-mix(in srgb, var(--border-color) 65%, transparent);
+}
+
+.paint-osd-pill separator {
+    margin: 4px 4px;
+    min-width: 1px;
+}
+
+.paint-osd-pill button,
+.paint-osd-pill togglebutton,
+.paint-osd-pill menubutton > button {
+    border-radius: 9999px;
+    min-height: 32px;
+    min-width: 32px;
+}
+
+.paint-osd-pill colorbutton > button {
+    border-radius: 9999px;
+    min-height: 30px;
+    min-width: 30px;
+    padding: 3px;
+}
+
+.paint-size-button {
+    padding-left: 10px;
+    padding-right: 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+.paint-menu-zoom-row {
+    padding: 4px 8px;
+}
+
+.paint-zoom-label {
+    min-width: 52px;
+    font-variant-numeric: tabular-nums;
+}
+
+.paint-info-grid {
+    padding: 6px;
+}
+
+.paint-dim-label {
+    opacity: 0.7;
+    font-size: 0.9em;
+}
