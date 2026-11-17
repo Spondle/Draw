@@ -638,7 +638,8 @@ PaintCanvas *
 paint_canvas_new (PaintDocument *doc, PaintToolSettings *settings)
 {
   PaintCanvas *self = g_object_new (PAINT_TYPE_CANVAS, NULL);
-  self->document = doc ? doc : paint_document_new (1280, 720);
+  self->document = doc ? doc : paint_document_new (PAINT_DEFAULT_CANVAS_WIDTH,
+                                                   PAINT_DEFAULT_CANVAS_HEIGHT);
   self->settings = settings;
   update_size_request (self);
   return self;

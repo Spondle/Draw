@@ -7,6 +7,9 @@
 
 G_BEGIN_DECLS
 
+#define PAINT_DEFAULT_CANVAS_WIDTH 800
+#define PAINT_DEFAULT_CANVAS_HEIGHT 500
+
 typedef struct _PaintDocument PaintDocument;
 
 PaintDocument *paint_document_new (int width, int height);
