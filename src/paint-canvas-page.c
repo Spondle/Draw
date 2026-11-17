@@ -197,10 +197,10 @@ build_ui (PaintCanvasPage *self)
   gtk_widget_set_vexpand (container, TRUE);
   gtk_widget_set_halign (container, GTK_ALIGN_CENTER);
   gtk_widget_set_valign (container, GTK_ALIGN_CENTER);
-  gtk_widget_set_margin_top (container, 36);
-  gtk_widget_set_margin_bottom (container, 84);
-  gtk_widget_set_margin_start (container, 36);
-  gtk_widget_set_margin_end (container, 36);
+  gtk_widget_set_margin_top (container, 24);
+  gtk_widget_set_margin_bottom (container, 76);
+  gtk_widget_set_margin_start (container, 32);
+  gtk_widget_set_margin_end (container, 32);
   gtk_box_append (GTK_BOX (container), GTK_WIDGET (self->canvas));
 
   gtk_scrolled_window_set_child (self->scrolled, container);

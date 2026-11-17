@@ -1034,7 +1034,7 @@ paint_window_init (PaintWindow *self)
   load_recent_files (self);
 
   gtk_window_set_title (GTK_WINDOW (self), "Paint");
-  gtk_window_set_default_size (GTK_WINDOW (self), 920, 660);
+  gtk_window_set_default_size (GTK_WINDOW (self), 910, 660);
 
   g_action_map_add_action_entries (G_ACTION_MAP (self),
                                    win_actions,
