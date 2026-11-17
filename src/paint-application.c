@@ -84,6 +84,7 @@ act_shortcuts (GSimpleAction *action G_GNUC_UNUSED,
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Redo", "<Control><Shift>z"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Brush Tool", "b"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Eraser Tool", "e"));
+  adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Fill Tool", "f"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Decrease / Increase Brush Size", "bracketleft bracketright"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Zoom In / Out / Reset", "<Control>plus <Control>minus <Control>0"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Fullscreen", "F11"));
@@ -120,6 +121,9 @@ paint_application_startup (GApplication *app)
 
   GdkDisplay *display = gdk_display_get_default ();
   if (display) {
+    GtkIconTheme *icon_theme = gtk_icon_theme_get_for_display (display);
+    gtk_icon_theme_add_resource_path (icon_theme, "/io/github/spondle/Paint/icons");
+
     g_autoptr (GtkCssProvider) provider = gtk_css_provider_new ();
     gtk_css_provider_load_from_resource (provider, "/io/github/spondle/Paint/style.css");
     gtk_style_context_add_provider_for_display (display,

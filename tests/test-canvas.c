@@ -158,6 +158,52 @@ test_resize_and_png_roundtrip (void)
   paint_document_free (doc);
 }
 
+static void
+test_fill_tool_and_undo (void)
+{
+  PaintDocument *doc = paint_document_new (64, 64);
+  PaintToolSettings *settings = paint_tool_settings_new ();
+
+  /* Draw a closed black box from (16,16) to (48,48) */
+  cairo_t *cr = cairo_create (paint_document_get_surface (doc));
+  cairo_set_source_rgba (cr, 0.0, 0.0, 0.0, 1.0);
+  cairo_set_line_width (cr, 4.0);
+  cairo_rectangle (cr, 16.0, 16.0, 32.0, 32.0);
+  cairo_stroke (cr);
+  cairo_destroy (cr);
+
+  /* Flood-fill inside the box with red */
+  settings->color = (GdkRGBA) { 1.0f, 0.0f, 0.0f, 1.0f };
+  const PaintTool *fill = paint_tools_find ("fill");
+  g_assert_cmpstr (fill->id, ==, "fill");
+
+  paint_document_begin_stroke (doc, 32.0, 32.0, fill, settings);
+  paint_document_end_stroke (doc, 32.0, 32.0, fill, settings);
+
+  guint8 r, g, b, a;
+  /* Inside filled */
+  read_pixel_rgba (doc, 32, 32, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 0);
+  g_assert_cmpuint (b, ==, 0);
+
+  /* Outside stays white */
+  read_pixel_rgba (doc, 4, 4, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+
+  /* Undo restores inside to white */
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 32, 32, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -166,5 +212,6 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/brush_stroke_and_undo_redo", test_brush_stroke_and_undo_redo);
   g_test_add_func ("/canvas/eraser_restores_background", test_eraser_restores_background);
   g_test_add_func ("/canvas/resize_and_png_roundtrip", test_resize_and_png_roundtrip);
+  g_test_add_func ("/canvas/fill_tool_and_undo", test_fill_tool_and_undo);
   return g_test_run ();
 }

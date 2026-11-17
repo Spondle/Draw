@@ -25,6 +25,7 @@ struct _PaintTool {
   const char *name;
   const char *icon_name;
   const char *tooltip;
+  gboolean uses_brush_size;
 
   void (*begin_stroke) (const PaintTool *tool,
                         cairo_t *cr,

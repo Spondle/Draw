@@ -2,5 +2,7 @@
 <gresources>
   <gresource prefix="/io/github/spondle/Paint">
     <file>style.css</file>
+    <file>icons/scalable/actions/tool-eraser-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-fill-symbolic.svg</file>
   </gresource>
 </gresources>

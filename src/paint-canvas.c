@@ -495,9 +495,12 @@ on_draw (GtkDrawingArea *area,
   cairo_restore (cr);
 
   if (self->show_cursor_ring && self->has_hover && self->settings) {
+    const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
     double px = self->hover_x * self->zoom;
     double py = self->hover_y * self->zoom;
-    double radius = MAX (2.0, (self->settings->size * self->zoom) / 2.0);
+    double radius = active_tool->uses_brush_size
+                      ? MAX (2.0, (self->settings->size * self->zoom) / 2.0)
+                      : 3.5;
 
     cairo_save (cr);
     cairo_set_line_width (cr, 1.5);
