@@ -207,6 +207,9 @@ build_ui (PaintCanvasPage *self)
   gtk_box_append (GTK_BOX (container), GTK_WIDGET (self->canvas));
 
   gtk_scrolled_window_set_child (self->scrolled, container);
+  GtkWidget *viewport = gtk_scrolled_window_get_child (self->scrolled);
+  if (GTK_IS_VIEWPORT (viewport))
+    gtk_viewport_set_scroll_to_focus (GTK_VIEWPORT (viewport), FALSE);
   gtk_overlay_set_child (self->overlay, GTK_WIDGET (self->scrolled));
 
   GtkEventController *scroll = gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
