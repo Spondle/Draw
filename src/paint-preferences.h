@@ -27,6 +27,10 @@ void paint_preferences_apply_theme (const PaintPreferences *prefs);
 typedef void (*PaintPreferencesChangedCallback) (const PaintPreferences *prefs,
                                                  gpointer user_data);
 
+GtkWidget *paint_theme_selector_new (PaintPreferences *prefs,
+                                     PaintPreferencesChangedCallback on_changed,
+                                     gpointer user_data);
+
 void paint_preferences_dialog_present (PaintPreferences *prefs,
                                        GtkWidget *parent,
                                        PaintPreferencesChangedCallback on_changed,

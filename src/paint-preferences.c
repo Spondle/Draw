@@ -96,6 +96,120 @@ typedef struct {
   PaintPreferences *prefs;
   PaintPreferencesChangedCallback on_changed;
   gpointer user_data;
+  GtkToggleButton *buttons[3];
+  GtkWidget *badges[3];
+  gboolean syncing;
+} ThemeSelectorCtx;
+
+static void
+sync_theme_selector (ThemeSelectorCtx *ctx)
+{
+  if (!ctx || !ctx->prefs)
+    return;
+  ctx->syncing = TRUE;
+  for (int i = 0; i < 3; i++) {
+    gboolean active = ((int) ctx->prefs->color_scheme == i);
+    gtk_toggle_button_set_active (ctx->buttons[i], active);
+    gtk_widget_set_visible (ctx->badges[i], active);
+  }
+  ctx->syncing = FALSE;
+}
+
+static void
+on_style_scheme_external_change (GtkWidget *box)
+{
+  ThemeSelectorCtx *ctx = g_object_get_data (G_OBJECT (box), "theme-selector-ctx");
+  sync_theme_selector (ctx);
+}
+
+static void
+on_theme_circle_toggled (GtkToggleButton *btn, gpointer user_data)
+{
+  ThemeSelectorCtx *ctx = user_data;
+  if (ctx->syncing || !gtk_toggle_button_get_active (btn))
+    return;
+
+  int idx = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (btn), "paint-scheme-idx"));
+  ctx->prefs->color_scheme = (PaintColorSchemePref) CLAMP (idx, 0, 2);
+  paint_preferences_save (ctx->prefs);
+  paint_preferences_apply_theme (ctx->prefs);
+  sync_theme_selector (ctx);
+  if (ctx->on_changed)
+    ctx->on_changed (ctx->prefs, ctx->user_data);
+}
+
+GtkWidget *
+paint_theme_selector_new (PaintPreferences *prefs,
+                          PaintPreferencesChangedCallback on_changed,
+                          gpointer user_data)
+{
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 14);
+  gtk_widget_add_css_class (box, "paint-theme-selector");
+  gtk_widget_set_halign (box, GTK_ALIGN_CENTER);
+
+  ThemeSelectorCtx *ctx = g_new0 (ThemeSelectorCtx, 1);
+  ctx->prefs = prefs;
+  ctx->on_changed = on_changed;
+  ctx->user_data = user_data;
+  g_object_set_data_full (G_OBJECT (box), "theme-selector-ctx", ctx, g_free);
+
+  static const struct {
+    const char *css_class;
+    const char *tooltip;
+  } items[3] = {
+    { "follow", "Follow System" },
+    { "light", "Light Style" },
+    { "dark", "Dark Style" },
+  };
+
+  GtkToggleButton *group_head = NULL;
+  for (int i = 0; i < 3; i++) {
+    GtkWidget *overlay = gtk_overlay_new ();
+
+    GtkWidget *btn = gtk_toggle_button_new ();
+    gtk_widget_add_css_class (btn, "paint-theme-circle");
+    gtk_widget_add_css_class (btn, items[i].css_class);
+    gtk_widget_set_tooltip_text (btn, items[i].tooltip);
+    if (!group_head)
+      group_head = GTK_TOGGLE_BUTTON (btn);
+    else
+      gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (btn), group_head);
+
+    g_object_set_data (G_OBJECT (btn), "paint-scheme-idx", GINT_TO_POINTER (i));
+    g_signal_connect (btn, "toggled", G_CALLBACK (on_theme_circle_toggled), ctx);
+    gtk_overlay_set_child (GTK_OVERLAY (overlay), btn);
+
+    GtkWidget *badge = gtk_image_new_from_icon_name ("object-select-symbolic");
+    gtk_image_set_pixel_size (GTK_IMAGE (badge), 11);
+    gtk_widget_add_css_class (badge, "paint-theme-check");
+    gtk_widget_set_halign (badge, GTK_ALIGN_END);
+    gtk_widget_set_valign (badge, GTK_ALIGN_END);
+    gtk_widget_set_can_target (badge, FALSE);
+    gtk_overlay_add_overlay (GTK_OVERLAY (overlay), badge);
+
+    ctx->buttons[i] = GTK_TOGGLE_BUTTON (btn);
+    ctx->badges[i] = badge;
+    gtk_box_append (GTK_BOX (box), overlay);
+  }
+
+  sync_theme_selector (ctx);
+
+  AdwStyleManager *style = adw_style_manager_get_default ();
+  if (style) {
+    g_signal_connect_object (style,
+                             "notify::color-scheme",
+                             G_CALLBACK (on_style_scheme_external_change),
+                             box,
+                             G_CONNECT_SWAPPED);
+  }
+
+  return box;
+}
+
+typedef struct {
+  PaintPreferences *prefs;
+  PaintPreferencesChangedCallback on_changed;
+  gpointer user_data;
 } PrefsDialogCtx;
 
 static void
@@ -105,15 +219,6 @@ notify_changed (PrefsDialogCtx *ctx)
   paint_preferences_apply_theme (ctx->prefs);
   if (ctx->on_changed)
     ctx->on_changed (ctx->prefs, ctx->user_data);
-}
-
-static void
-on_scheme_selected (GObject *obj, GParamSpec *pspec G_GNUC_UNUSED, gpointer user_data)
-{
-  PrefsDialogCtx *ctx = user_data;
-  guint idx = adw_combo_row_get_selected (ADW_COMBO_ROW (obj));
-  ctx->prefs->color_scheme = (PaintColorSchemePref) CLAMP ((int) idx, 0, 2);
-  notify_changed (ctx);
 }
 
 static void
@@ -179,13 +284,10 @@ paint_preferences_dialog_present (PaintPreferences *prefs,
   GtkWidget *appearance_grp = adw_preferences_group_new ();
   adw_preferences_group_set_title (ADW_PREFERENCES_GROUP (appearance_grp), "Appearance");
 
-  GtkWidget *scheme_row = adw_combo_row_new ();
+  GtkWidget *scheme_row = adw_action_row_new ();
   adw_preferences_row_set_title (ADW_PREFERENCES_ROW (scheme_row), "Color Scheme");
-  const char *const schemes[] = { "Follow System", "Light", "Dark", NULL };
-  g_autoptr (GtkStringList) scheme_model = gtk_string_list_new (schemes);
-  adw_combo_row_set_model (ADW_COMBO_ROW (scheme_row), G_LIST_MODEL (scheme_model));
-  adw_combo_row_set_selected (ADW_COMBO_ROW (scheme_row), (guint) prefs->color_scheme);
-  g_signal_connect (scheme_row, "notify::selected", G_CALLBACK (on_scheme_selected), ctx);
+  adw_action_row_add_suffix (ADW_ACTION_ROW (scheme_row),
+                             paint_theme_selector_new (prefs, on_changed, user_data));
   adw_preferences_group_add (ADW_PREFERENCES_GROUP (appearance_grp), scheme_row);
 
   GtkWidget *cursor_row = adw_switch_row_new ();

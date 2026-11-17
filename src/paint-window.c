@@ -846,6 +846,18 @@ build_primary_menu (PaintWindow *self)
 {
   g_autoptr (GMenu) menu = g_menu_new ();
 
+  GApplication *app = g_application_get_default ();
+  PaintPreferences *prefs = (app && PAINT_IS_APPLICATION (app))
+                              ? paint_application_get_preferences (PAINT_APPLICATION (app))
+                              : NULL;
+  if (prefs) {
+    g_autoptr (GMenu) theme_section = g_menu_new ();
+    g_autoptr (GMenuItem) theme_item = g_menu_item_new (NULL, NULL);
+    g_menu_item_set_attribute (theme_item, "custom", "s", "theme_selector");
+    g_menu_append_item (theme_section, theme_item);
+    g_menu_append_section (menu, NULL, G_MENU_MODEL (theme_section));
+  }
+
   g_autoptr (GMenu) zoom_section = g_menu_new ();
   g_autoptr (GMenuItem) zoom_item = g_menu_item_new (NULL, NULL);
   g_menu_item_set_attribute (zoom_item, "custom", "s", "zoom_controls");
@@ -872,6 +884,11 @@ build_primary_menu (PaintWindow *self)
   g_menu_append_section (menu, NULL, G_MENU_MODEL (app_section));
 
   GtkWidget *popover = gtk_popover_menu_new_from_model (G_MENU_MODEL (menu));
+  if (prefs) {
+    gtk_popover_menu_add_child (GTK_POPOVER_MENU (popover),
+                                paint_theme_selector_new (prefs, NULL, NULL),
+                                "theme_selector");
+  }
   gtk_popover_menu_add_child (GTK_POPOVER_MENU (popover), build_zoom_row (self), "zoom_controls");
   return popover;
 }

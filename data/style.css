@@ -65,3 +65,41 @@
     opacity: 0.7;
     font-size: 0.9em;
 }
+
+.paint-theme-selector {
+    padding: 8px 12px 4px 12px;
+}
+
+.paint-theme-circle {
+    min-width: 40px;
+    min-height: 40px;
+    padding: 0;
+    border-radius: 9999px;
+    border: 1px solid color-mix(in srgb, var(--window-fg-color) 20%, transparent);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
+}
+
+.paint-theme-circle.follow {
+    background-image: linear-gradient(to bottom right, #ffffff 49.5%, #1e1e1e 50.5%);
+}
+
+.paint-theme-circle.light {
+    background-color: #ffffff;
+}
+
+.paint-theme-circle.dark {
+    background-color: #202024;
+}
+
+.paint-theme-circle:checked {
+    border: 2px solid var(--accent-bg-color);
+}
+
+.paint-theme-check {
+    min-width: 18px;
+    min-height: 18px;
+    border-radius: 9999px;
+    background-color: var(--accent-bg-color);
+    color: var(--accent-fg-color);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
