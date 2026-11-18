@@ -1252,16 +1252,33 @@ box_downsample_rect (cairo_surface_t *src_surf,
   cairo_surface_mark_dirty_rectangle (dst_surf, dx0, dy0, dw, dh);
 }
 
+static double
+get_widget_device_scale (GtkWidget *widget)
+{
+  GtkNative *native = gtk_widget_get_native (widget);
+  if (native) {
+    GdkSurface *surface = gtk_native_get_surface (native);
+    if (surface) {
+      double s = gdk_surface_get_scale (surface);
+      if (s > 0.0)
+        return s;
+    }
+  }
+  int sf = gtk_widget_get_scale_factor (widget);
+  return sf > 0 ? (double) sf : 1.0;
+}
+
 static GdkTexture *
-ensure_overview_texture (PaintCanvas *self)
+ensure_overview_texture (PaintCanvas *self, double device_scale)
 {
   PaintDocument *doc = self->document;
   if (!doc || !doc->surface)
     return NULL;
 
+  int max_ov_dim = (device_scale > 1.25) ? MAX_OVERVIEW_DIM * 2 : MAX_OVERVIEW_DIM;
   int max_dim = MAX (doc->width, doc->height);
   int div = 1;
-  while (max_dim / div > MAX_OVERVIEW_DIM)
+  while (max_dim / div > max_ov_dim)
     div *= 2;
   int ow = MAX (1, (doc->width + div - 1) / div);
   int oh = MAX (1, (doc->height + div - 1) / div);
@@ -1369,75 +1386,123 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 
   propagate_document_dirty (self);
 
+  double device_scale = get_widget_device_scale (widget);
+  double eff_zoom = self->zoom * device_scale;
+  const PaintTool *active_tool = self->settings
+                                   ? paint_tools_find (self->settings->active_tool_id)
+                                   : NULL;
+  gboolean has_preview = self->drawing_active &&
+                         !self->touch_stroke_pending &&
+                         active_tool &&
+                         active_tool->draw_preview != NULL;
+
+  int active_div = 1;
+  GskScalingFilter canvas_filter = GSK_SCALING_FILTER_LINEAR;
+  graphene_rect_t vis_rect = compute_visible_widget_rect (self);
+
   if (target_vp_div (self) == 0) {
-    GdkTexture *tex = ensure_overview_texture (self);
+    GdkTexture *tex = ensure_overview_texture (self, device_scale);
     if (!tex)
       return;
+    active_div = self->ov_div;
     float bw = (float) (self->ov_w * self->ov_div * self->zoom);
     float bh = (float) (self->ov_h * self->ov_div * self->zoom);
     if (bw <= 0.0f || bh <= 0.0f)
       return;
-    GskScalingFilter filter = (!self->drawing_active && self->zoom * self->ov_div < 0.5)
-                                ? GSK_SCALING_FILTER_TRILINEAR
-                                : GSK_SCALING_FILTER_LINEAR;
+    gboolean trilinear = (!self->drawing_active || has_preview) &&
+                         (eff_zoom * self->ov_div < 0.5);
+    canvas_filter = trilinear ? GSK_SCALING_FILTER_TRILINEAR : GSK_SCALING_FILTER_LINEAR;
     gtk_snapshot_append_scaled_texture (snapshot,
                                         tex,
-                                        filter,
+                                        canvas_filter,
                                         &GRAPHENE_RECT_INIT (0.0f, 0.0f, bw, bh));
   } else {
-    graphene_rect_t vis_rect = compute_visible_widget_rect (self);
     if (vis_rect.size.width <= 0.0f || vis_rect.size.height <= 0.0f)
       return;
     GdkTexture *tex = ensure_vp_texture (self, &vis_rect);
     if (!tex)
       return;
+    active_div = self->vp_div;
 
     float x0 = (float) (self->vp_x * self->zoom);
     float y0 = (float) (self->vp_y * self->zoom);
     float x1 = (float) ((self->vp_x + self->vp_surf_w * self->vp_div) * self->zoom);
     float y1 = (float) ((self->vp_y + self->vp_surf_h * self->vp_div) * self->zoom);
-    GskScalingFilter filter = (self->zoom >= 2.0)
-                                ? GSK_SCALING_FILTER_NEAREST
-                                : GSK_SCALING_FILTER_LINEAR;
+    double cache_eff_zoom = eff_zoom / (double) self->vp_div;
+    canvas_filter = (fabs (cache_eff_zoom - 1.0) < 1e-4 || cache_eff_zoom >= 1.5)
+                      ? GSK_SCALING_FILTER_NEAREST
+                      : GSK_SCALING_FILTER_LINEAR;
     gtk_snapshot_append_scaled_texture (snapshot,
                                         tex,
-                                        filter,
+                                        canvas_filter,
                                         &GRAPHENE_RECT_INIT (x0, y0, x1 - x0, y1 - y0));
   }
 
-  if (self->drawing_active && !self->touch_stroke_pending && self->settings) {
-    const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
-    if (active_tool->draw_preview) {
-      double x0 = self->drag_start_x / self->zoom;
-      double y0 = self->drag_start_y / self->zoom;
-      double x1 = self->preview_end_x;
-      double y1 = self->preview_end_y;
+  if (has_preview) {
+    double x0 = self->drag_start_x / self->zoom;
+    double y0 = self->drag_start_y / self->zoom;
+    double x1 = self->preview_end_x;
+    double y1 = self->preview_end_y;
 
-      double min_wx = MIN (x0, x1) * self->zoom;
-      double max_wx = MAX (x0, x1) * self->zoom;
-      double min_wy = MIN (y0, y1) * self->zoom;
-      double max_wy = MAX (y0, y1) * self->zoom;
-      double pad = (MAX (1.0, self->settings->size) * self->zoom) * 0.5 + 4.0;
+    int rx, ry, rw, rh;
+    double stroke_size = active_tool->uses_brush_size ? self->settings->size : 1.0;
+    compute_stroke_bounds (x0, y0, x1, y1, stroke_size, &rx, &ry, &rw, &rh);
 
-      float canvas_w = (float) gtk_widget_get_width (widget);
-      float canvas_h = (float) gtk_widget_get_height (widget);
-      float bx0 = MAX (0.0f, (float) floor (min_wx - pad));
-      float by0 = MAX (0.0f, (float) floor (min_wy - pad));
-      float bx1 = MIN (canvas_w, (float) ceil (max_wx + pad));
-      float by1 = MIN (canvas_h, (float) ceil (max_wy + pad));
+    int vis_x0 = MAX (0, (int) floor (vis_rect.origin.x / self->zoom) - 4);
+    int vis_y0 = MAX (0, (int) floor (vis_rect.origin.y / self->zoom) - 4);
+    int vis_x1 = MIN (self->document->width,
+                      (int) ceil ((vis_rect.origin.x + vis_rect.size.width) / self->zoom) + 4);
+    int vis_y1 = MIN (self->document->height,
+                      (int) ceil ((vis_rect.origin.y + vis_rect.size.height) / self->zoom) + 4);
 
-      if (bx1 > bx0 && by1 > by0) {
-        graphene_rect_t pbounds = GRAPHENE_RECT_INIT (bx0, by0, bx1 - bx0, by1 - by0);
-        cairo_t *cr = gtk_snapshot_append_cairo (snapshot, &pbounds);
-        cairo_scale (cr, self->zoom, self->zoom);
-        active_tool->draw_preview (active_tool, cr, x0, y0, x1, y1, self->settings);
-        cairo_destroy (cr);
+    int cx0 = MAX (vis_x0, rx);
+    int cy0 = MAX (vis_y0, ry);
+    int cx1 = MIN (vis_x1, rx + rw);
+    int cy1 = MIN (vis_y1, ry + rh);
+
+    if (cx0 < cx1 && cy0 < cy1) {
+      int div = MAX (1, active_div);
+      int ax0 = (cx0 / div) * div;
+      int ay0 = (cy0 / div) * div;
+      int ax1 = MIN (self->document->width, ((cx1 + div - 1) / div) * div);
+      int ay1 = MIN (self->document->height, ((cy1 + div - 1) / div) * div);
+      int sw = MAX (1, (ax1 - ax0 + div - 1) / div);
+      int sh = MAX (1, (ay1 - ay0 + div - 1) / div);
+
+      cairo_surface_t *psurf = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, sw, sh);
+      cairo_t *cr = cairo_create (psurf);
+      if (div > 1)
+        cairo_scale (cr, 1.0 / (double) div, 1.0 / (double) div);
+      cairo_translate (cr, -(double) ax0, -(double) ay0);
+      active_tool->draw_preview (active_tool, cr, x0, y0, x1, y1, self->settings);
+      cairo_destroy (cr);
+
+      cairo_surface_flush (psurf);
+      int stride = cairo_image_surface_get_stride (psurf);
+      unsigned char *data = cairo_image_surface_get_data (psurf);
+      g_autoptr (GBytes) bytes = g_bytes_new (data, (gsize) stride * (gsize) sh);
+      g_autoptr (GdkTexture) ptex = gdk_memory_texture_new (sw, sh, GDK_MEMORY_DEFAULT, bytes, (gsize) stride);
+      cairo_surface_destroy (psurf);
+
+      float px0 = (float) (ax0 * self->zoom);
+      float py0 = (float) (ay0 * self->zoom);
+      float px1 = (float) ((ax0 + sw * div) * self->zoom);
+      float py1 = (float) ((ay0 + sh * div) * self->zoom);
+      if (div > 1) {
+        float cw = (float) (self->document->width * self->zoom);
+        float ch = (float) (self->document->height * self->zoom);
+        gtk_snapshot_push_clip (snapshot, &GRAPHENE_RECT_INIT (0.0f, 0.0f, cw, ch));
       }
+      gtk_snapshot_append_scaled_texture (snapshot,
+                                          ptex,
+                                          canvas_filter,
+                                          &GRAPHENE_RECT_INIT (px0, py0, px1 - px0, py1 - py0));
+      if (div > 1)
+        gtk_snapshot_pop (snapshot);
     }
   }
 
-  if (self->show_cursor_ring && self->has_hover && self->settings) {
-    const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
+  if (self->show_cursor_ring && self->has_hover && active_tool) {
     double px = self->hover_x * self->zoom;
     double py = self->hover_y * self->zoom;
     double radius = active_tool->uses_brush_size
