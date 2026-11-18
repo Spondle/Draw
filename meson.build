@@ -42,6 +42,10 @@ install_data('data/io.github.spondle.Paint.desktop',
   install_dir: get_option('datadir') / 'applications',
 )
 
+install_data('data/io.github.spondle.Paint.metainfo.xml',
+  install_dir: get_option('datadir') / 'metainfo',
+)
+
 install_data('data/icons/scalable/apps/io.github.spondle.Paint.svg',
   install_dir: get_option('datadir') / 'icons/hicolor/scalable/apps',
 )

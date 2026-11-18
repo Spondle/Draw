@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.spondle.Paint</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Paint</name>
+  <summary>Draw and paint images in a clean GNOME workspace</summary>
+  <description>
+    <p>
+      Paint is a fast, distraction-free raster drawing and painting application
+      built with GTK 4, Libadwaita, and Cairo in the style of GNOME Text Editor
+      and Ptyxis.
+    </p>
+    <ul>
+      <li>Smooth anti-aliased brush, eraser, and tolerance-aware flood fill tools</li>
+      <li>Tabbed canvases with tab overview and drag-out window tear-off</li>
+      <li>Automatic session restore preserving open tabs and unsaved drafts</li>
+      <li>Touchscreen-friendly canvas with zoom, pan, and customizable defaults</li>
+      <li>Open and export PNG, JPEG, WebP, and BMP images</li>
+    </ul>
+  </description>
+  <developer id="io.github.spondle">
+    <name>spondle</name>
+  </developer>
+  <url type="homepage">https://github.com/Spondle/Draw</url>
+  <url type="bugtracker">https://github.com/Spondle/Draw/issues</url>
+  <url type="vcs-browser">https://github.com/Spondle/Draw</url>
+  <launchable type="desktop-id">io.github.spondle.Paint.desktop</launchable>
+  <provides>
+    <binary>paint</binary>
+  </provides>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-11-17">
+      <description>
+        <p>Initial release with tabbed canvases, brush, eraser, flood fill, session restore, and Adwaita preferences.</p>
+      </description>
+    </release>
+  </releases>
+</component>
