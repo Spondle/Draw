@@ -53,7 +53,7 @@ void paint_document_resize (PaintDocument *doc, int new_width, int new_height);
 gboolean paint_document_save_to_file (PaintDocument *doc, GFile *file, GError **error);
 
 #define PAINT_TYPE_CANVAS (paint_canvas_get_type ())
-G_DECLARE_FINAL_TYPE (PaintCanvas, paint_canvas, PAINT, CANVAS, GtkDrawingArea)
+G_DECLARE_FINAL_TYPE (PaintCanvas, paint_canvas, PAINT, CANVAS, GtkWidget)
 
 PaintCanvas *paint_canvas_new (PaintDocument *doc, PaintToolSettings *settings);
 

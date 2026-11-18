@@ -437,7 +437,7 @@ paint_document_save_to_file (PaintDocument *doc, GFile *file, GError **error)
 }
 
 /* ============================================================================
- * PaintCanvas (GtkDrawingArea)
+ * PaintCanvas (GPU-accelerated GtkWidget)
  * ============================================================================ */
 
 enum {
@@ -449,10 +449,11 @@ enum {
 static guint signals[N_SIGNALS];
 
 struct _PaintCanvas {
-  GtkDrawingArea parent_instance;
+  GtkWidget parent_instance;
 
   PaintDocument *document;
   PaintToolSettings *settings; /* unowned shared settings */
+  GdkTexture *cached_texture;
   double zoom;
   gboolean has_hover;
   double hover_x;
@@ -463,7 +464,31 @@ struct _PaintCanvas {
   gboolean show_cursor_ring;
 };
 
-G_DEFINE_FINAL_TYPE (PaintCanvas, paint_canvas, GTK_TYPE_DRAWING_AREA)
+G_DEFINE_FINAL_TYPE (PaintCanvas, paint_canvas, GTK_TYPE_WIDGET)
+
+static void
+invalidate_texture (PaintCanvas *self)
+{
+  g_clear_object (&self->cached_texture);
+}
+
+static GdkTexture *
+ensure_texture (PaintCanvas *self)
+{
+  if (self->cached_texture || !self->document)
+    return self->cached_texture;
+
+  cairo_surface_t *surface = self->document->surface;
+  cairo_surface_flush (surface);
+  int w = cairo_image_surface_get_width (surface);
+  int h = cairo_image_surface_get_height (surface);
+  int stride = cairo_image_surface_get_stride (surface);
+  const unsigned char *data = cairo_image_surface_get_data (surface);
+
+  g_autoptr (GBytes) bytes = g_bytes_new (data, (gsize) stride * (gsize) h);
+  self->cached_texture = gdk_memory_texture_new (w, h, GDK_MEMORY_DEFAULT, bytes, (gsize) stride);
+  return self->cached_texture;
+}
 
 static void
 update_size_request (PaintCanvas *self)
@@ -473,27 +498,63 @@ update_size_request (PaintCanvas *self)
   int w = MAX (1, (int) lround (self->document->width * self->zoom));
   int h = MAX (1, (int) lround (self->document->height * self->zoom));
   gtk_widget_set_size_request (GTK_WIDGET (self), w, h);
+
+  if (w > 4096 || h > 4096)
+    gtk_widget_remove_css_class (GTK_WIDGET (self), "paint-canvas-shadow");
+  else
+    gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-shadow");
+
+  gtk_widget_queue_resize (GTK_WIDGET (self));
 }
 
 static void
-on_draw (GtkDrawingArea *area,
-         cairo_t *cr,
-         int width G_GNUC_UNUSED,
-         int height G_GNUC_UNUSED,
-         gpointer user_data G_GNUC_UNUSED)
+paint_canvas_measure (GtkWidget *widget,
+                      GtkOrientation orientation,
+                      int for_size G_GNUC_UNUSED,
+                      int *minimum,
+                      int *natural,
+                      int *minimum_baseline,
+                      int *natural_baseline)
 {
-  PaintCanvas *self = PAINT_CANVAS (area);
-  if (!self->document)
+  PaintCanvas *self = PAINT_CANVAS (widget);
+  int size = 1;
+  if (self->document) {
+    double dim = (orientation == GTK_ORIENTATION_HORIZONTAL)
+                   ? self->document->width
+                   : self->document->height;
+    size = MAX (1, (int) lround (dim * self->zoom));
+  }
+  *minimum = size;
+  *natural = size;
+  if (minimum_baseline)
+    *minimum_baseline = -1;
+  if (natural_baseline)
+    *natural_baseline = -1;
+}
+
+static void
+paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
+{
+  PaintCanvas *self = PAINT_CANVAS (widget);
+  GdkTexture *texture = ensure_texture (self);
+  if (!texture)
     return;
 
-  cairo_save (cr);
-  cairo_scale (cr, self->zoom, self->zoom);
-  cairo_set_source_surface (cr, self->document->surface, 0, 0);
-  cairo_pattern_t *pattern = cairo_get_source (cr);
-  cairo_pattern_set_filter (pattern,
-                            self->zoom >= 3.0 ? CAIRO_FILTER_NEAREST : CAIRO_FILTER_GOOD);
-  cairo_paint (cr);
-  cairo_restore (cr);
+  float draw_w = (float) gtk_widget_get_width (widget);
+  float draw_h = (float) gtk_widget_get_height (widget);
+  if (draw_w <= 0.0f || draw_h <= 0.0f)
+    return;
+
+  GskScalingFilter filter = GSK_SCALING_FILTER_LINEAR;
+  if (self->zoom >= 2.0)
+    filter = GSK_SCALING_FILTER_NEAREST;
+  else if (self->zoom < 1.0)
+    filter = GSK_SCALING_FILTER_TRILINEAR;
+
+  gtk_snapshot_append_scaled_texture (snapshot,
+                                      texture,
+                                      filter,
+                                      &GRAPHENE_RECT_INIT (0.0f, 0.0f, draw_w, draw_h));
 
   if (self->show_cursor_ring && self->has_hover && self->settings) {
     const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
@@ -503,7 +564,12 @@ on_draw (GtkDrawingArea *area,
                       ? MAX (2.0, (self->settings->size * self->zoom) / 2.0)
                       : 3.5;
 
-    cairo_save (cr);
+    float pad = (float) (radius + 4.0);
+    graphene_rect_t bounds = GRAPHENE_RECT_INIT ((float) px - pad,
+                                                 (float) py - pad,
+                                                 pad * 2.0f,
+                                                 pad * 2.0f);
+    cairo_t *cr = gtk_snapshot_append_cairo (snapshot, &bounds);
     cairo_set_line_width (cr, 1.5);
     cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 0.85);
     cairo_arc (cr, px, py, radius + 0.75, 0.0, 2.0 * G_PI);
@@ -513,7 +579,7 @@ on_draw (GtkDrawingArea *area,
     cairo_set_source_rgba (cr, 0.0, 0.0, 0.0, 0.75);
     cairo_arc (cr, px, py, radius, 0.0, 2.0 * G_PI);
     cairo_stroke (cr);
-    cairo_restore (cr);
+    cairo_destroy (cr);
   }
 }
 
@@ -538,6 +604,7 @@ on_drag_begin (GtkGestureDrag *gesture,
 
   const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
   paint_document_begin_stroke (self->document, cx, cy, tool, self->settings);
+  invalidate_texture (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
 }
@@ -560,6 +627,7 @@ on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
 
   const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
   paint_document_continue_stroke (self->document, cx, cy, tool, self->settings);
+  invalidate_texture (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
@@ -579,6 +647,7 @@ on_drag_end (GtkGestureDrag *gesture G_GNUC_UNUSED,
 
   const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
   paint_document_end_stroke (self->document, cx, cy, tool, self->settings);
+  invalidate_texture (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
 }
@@ -619,6 +688,7 @@ static void
 paint_canvas_finalize (GObject *object)
 {
   PaintCanvas *self = PAINT_CANVAS (object);
+  invalidate_texture (self);
   g_clear_pointer (&self->document, paint_document_free);
   G_OBJECT_CLASS (paint_canvas_parent_class)->finalize (object);
 }
@@ -628,6 +698,10 @@ paint_canvas_class_init (PaintCanvasClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   object_class->finalize = paint_canvas_finalize;
+
+  GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
+  widget_class->measure = paint_canvas_measure;
+  widget_class->snapshot = paint_canvas_snapshot;
 
   signals[SIGNAL_CHANGED] = g_signal_new ("changed",
                                           G_TYPE_FROM_CLASS (klass),
@@ -648,10 +722,11 @@ paint_canvas_init (PaintCanvas *self)
   self->show_cursor_ring = TRUE;
 
   gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-frame");
+  gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-shadow");
   gtk_widget_set_halign (GTK_WIDGET (self), GTK_ALIGN_CENTER);
   gtk_widget_set_valign (GTK_WIDGET (self), GTK_ALIGN_CENTER);
   gtk_widget_set_focusable (GTK_WIDGET (self), TRUE);
-  gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (self), on_draw, NULL, NULL);
+  gtk_widget_set_overflow (GTK_WIDGET (self), GTK_OVERFLOW_HIDDEN);
 
   GtkGesture *drag = gtk_gesture_drag_new ();
   gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (drag), GDK_BUTTON_PRIMARY);
@@ -687,6 +762,7 @@ paint_canvas_get_document (PaintCanvas *self)
 void
 paint_canvas_set_document (PaintCanvas *self, PaintDocument *doc)
 {
+  invalidate_texture (self);
   g_clear_pointer (&self->document, paint_document_free);
   self->document = doc;
   update_size_request (self);
@@ -764,6 +840,7 @@ gboolean
 paint_canvas_undo (PaintCanvas *self)
 {
   if (paint_document_undo (self->document)) {
+    invalidate_texture (self);
     update_size_request (self);
     gtk_widget_queue_draw (GTK_WIDGET (self));
     g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
@@ -776,6 +853,7 @@ gboolean
 paint_canvas_redo (PaintCanvas *self)
 {
   if (paint_document_redo (self->document)) {
+    invalidate_texture (self);
     update_size_request (self);
     gtk_widget_queue_draw (GTK_WIDGET (self));
     g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
@@ -788,6 +866,7 @@ void
 paint_canvas_clear (PaintCanvas *self)
 {
   paint_document_clear (self->document);
+  invalidate_texture (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
 }
@@ -796,6 +875,7 @@ void
 paint_canvas_resize (PaintCanvas *self, int width, int height)
 {
   paint_document_resize (self->document, width, height);
+  invalidate_texture (self);
   update_size_request (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
