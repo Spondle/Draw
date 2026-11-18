@@ -981,15 +981,15 @@ build_shapes_popover (PaintCanvasPage *self)
   gtk_widget_set_margin_start (box, 12);
   gtk_widget_set_margin_end (box, 12);
 
-  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 16);
   GtkWidget *heading = gtk_label_new ("Shapes");
   gtk_widget_add_css_class (heading, "heading");
   gtk_widget_set_halign (heading, GTK_ALIGN_START);
   gtk_widget_set_hexpand (heading, TRUE);
   gtk_box_append (GTK_BOX (header), heading);
 
-  GtkWidget *mode_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_add_css_class (mode_box, "linked");
+  GtkWidget *mode_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_widget_add_css_class (mode_box, "paint-shape-mode");
 
   self->shape_outline_btn = gtk_toggle_button_new_with_label ("Outline");
   self->shape_fill_btn = gtk_toggle_button_new_with_label ("Filled");
@@ -1007,8 +1007,9 @@ build_shapes_popover (PaintCanvasPage *self)
   gtk_box_append (GTK_BOX (box), header);
 
   GtkWidget *grid = gtk_grid_new ();
-  gtk_grid_set_row_spacing (GTK_GRID (grid), 4);
-  gtk_grid_set_column_spacing (GTK_GRID (grid), 4);
+  gtk_widget_set_halign (grid, GTK_ALIGN_CENTER);
+  gtk_grid_set_row_spacing (GTK_GRID (grid), 6);
+  gtk_grid_set_column_spacing (GTK_GRID (grid), 6);
 
   gsize n_tools = 0;
   const PaintTool *tools = paint_tools_get_all (&n_tools);
@@ -1023,15 +1024,9 @@ build_shapes_popover (PaintCanvasPage *self)
     gtk_widget_add_css_class (btn, "paint-shape-tile");
     gtk_widget_set_tooltip_text (btn, tools[i].tooltip);
 
-    GtkWidget *tile = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
-    gtk_widget_set_halign (tile, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign (tile, GTK_ALIGN_CENTER);
     GtkWidget *img = gtk_image_new_from_icon_name (tools[i].icon_name);
     gtk_image_set_pixel_size (GTK_IMAGE (img), 20);
-    GtkWidget *lbl = gtk_label_new (tools[i].name);
-    gtk_box_append (GTK_BOX (tile), img);
-    gtk_box_append (GTK_BOX (tile), lbl);
-    gtk_button_set_child (GTK_BUTTON (btn), tile);
+    gtk_button_set_child (GTK_BUTTON (btn), img);
 
     if (!first_shape)
       first_shape = GTK_TOGGLE_BUTTON (btn);

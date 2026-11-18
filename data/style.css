@@ -78,20 +78,22 @@
     background-color: color-mix(in srgb, currentColor 15%, transparent);
 }
 
-.paint-shape-tile {
-    min-width: 66px;
-    min-height: 54px;
-    padding: 6px 4px;
+.paint-osd-pill .paint-shape-mode togglebutton {
+    border-radius: 8px;
+    min-height: 28px;
+    padding: 4px 12px;
+}
+
+.paint-osd-pill .paint-shape-tile {
+    min-width: 42px;
+    min-height: 42px;
+    padding: 0;
     border-radius: 10px;
 }
 
-.paint-shape-tile:checked {
+.paint-osd-pill .paint-shape-tile:checked {
     background-color: color-mix(in srgb, var(--accent-bg-color) 18%, transparent);
     color: var(--accent-color);
-}
-
-.paint-shape-tile label {
-    font-size: 0.78em;
 }
 
 .paint-menu-zoom-row {
