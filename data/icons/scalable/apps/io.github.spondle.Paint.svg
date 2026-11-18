@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="canvas-face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f6f5f4"/>
+    </linearGradient>
+    <linearGradient id="canvas-edge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#c0bfbc"/>
+      <stop offset="50%" stop-color="#deddda"/>
+      <stop offset="100%" stop-color="#c0bfbc"/>
+    </linearGradient>
+    <linearGradient id="stroke-grad" x1="28" y1="88" x2="84" y2="54" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ff7800"/>
+      <stop offset="48%" stop-color="#9141ac"/>
+      <stop offset="100%" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="handle-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#b5835a"/>
+      <stop offset="55%" stop-color="#865e3c"/>
+      <stop offset="100%" stop-color="#63452c"/>
+    </linearGradient>
+    <linearGradient id="ferrule-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#deddda"/>
+      <stop offset="45%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#9a9996"/>
+    </linearGradient>
+    <linearGradient id="tip-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#62a0ea"/>
+      <stop offset="100%" stop-color="#1a5fb4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Subtle GNOME 3D base shadow / bottom lip -->
+  <rect x="14" y="25" width="100" height="91" rx="12" fill="rgba(0,0,0,0.14)"/>
+  <rect x="14" y="21" width="100" height="91" rx="12" fill="url(#canvas-edge)"/>
+
+  <!-- Canvas sheet -->
+  <rect x="14" y="17" width="100" height="89" rx="12" fill="url(#canvas-face)"/>
+  <rect x="14.5" y="17.5" width="99" height="88" rx="11.5" fill="none" stroke="rgba(0,0,0,0.08)"/>
+
+  <!-- Subtle GNOME headerbar strip -->
+  <path d="M 14 29 A 12 12 0 0 1 26 17 H 102 A 12 12 0 0 1 114 29 V 31 H 14 Z" fill="#3d3846"/>
+
+  <!-- Vibrant GNOME-palette brushstroke -->
+  <path d="M 30 84 C 38 62, 54 90, 66 74 C 74 64, 72 58, 79 54"
+        fill="none" stroke="url(#stroke-grad)" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Soft shadow under paintbrush -->
+  <g transform="translate(2, 4) rotate(38 80 54)" opacity="0.16">
+    <rect x="74.5" y="-6" width="11" height="42" rx="5.5" fill="#000000"/>
+    <path d="M 75 36 H 85 L 82.5 55 C 80.5 59 77 56 75 36 Z" fill="#000000"/>
+  </g>
+
+  <!-- Tilted Artist Paintbrush (top-right down to brushstroke tip at 80,54) -->
+  <g transform="rotate(38 80 54)">
+    <!-- Handle -->
+    <rect x="74.5" y="-9" width="11" height="45" rx="5.5" fill="url(#handle-grad)"/>
+    <!-- Ferrule -->
+    <rect x="75" y="32" width="10" height="11" rx="1.5" fill="url(#ferrule-grad)"/>
+    <!-- Bristle tip -->
+    <path d="M 75 43 H 85 C 85 51 82.5 57 78.5 59 C 76.2 55 75 49 75 43 Z" fill="url(#tip-grad)"/>
+    <!-- Specular highlight -->
+    <path d="M 77.6 45 C 77.6 49 78 53 79 55.5" fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="1.5" stroke-linecap="round"/>
+  </g>
+</svg>

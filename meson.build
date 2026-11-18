@@ -38,6 +38,18 @@ executable('paint',
   install: true,
 )
 
+install_data('data/io.github.spondle.Paint.desktop',
+  install_dir: get_option('datadir') / 'applications',
+)
+
+install_data('data/icons/scalable/apps/io.github.spondle.Paint.svg',
+  install_dir: get_option('datadir') / 'icons/hicolor/scalable/apps',
+)
+
+install_data('data/icons/symbolic/apps/io.github.spondle.Paint-symbolic.svg',
+  install_dir: get_option('datadir') / 'icons/hicolor/symbolic/apps',
+)
+
 test_canvas = executable('test-canvas',
   core_sources + files('tests/test-canvas.c'),
   dependencies: [gtk4_dep, cairo_dep, math_dep],

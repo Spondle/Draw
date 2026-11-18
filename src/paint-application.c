@@ -51,7 +51,7 @@ act_about (GSimpleAction *action G_GNUC_UNUSED,
   GtkApplication *app = GTK_APPLICATION (user_data);
   AdwDialog *about = adw_about_dialog_new ();
   adw_about_dialog_set_application_name (ADW_ABOUT_DIALOG (about), PAINT_APP_NAME);
-  adw_about_dialog_set_application_icon (ADW_ABOUT_DIALOG (about), "applications-graphics-symbolic");
+  adw_about_dialog_set_application_icon (ADW_ABOUT_DIALOG (about), PAINT_APP_ID);
   adw_about_dialog_set_version (ADW_ABOUT_DIALOG (about), PAINT_APP_VERSION);
   adw_about_dialog_set_developer_name (ADW_ABOUT_DIALOG (about), "Paint Contributors");
   adw_about_dialog_set_comments (
@@ -123,6 +123,7 @@ paint_application_startup (GApplication *app)
   if (display) {
     GtkIconTheme *icon_theme = gtk_icon_theme_get_for_display (display);
     gtk_icon_theme_add_resource_path (icon_theme, "/io/github/spondle/Paint/icons");
+    gtk_window_set_default_icon_name (PAINT_APP_ID);
 
     g_autoptr (GtkCssProvider) provider = gtk_css_provider_new ();
     gtk_css_provider_load_from_resource (provider, "/io/github/spondle/Paint/style.css");
