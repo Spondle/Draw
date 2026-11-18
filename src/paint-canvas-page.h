@@ -14,6 +14,7 @@ PaintCanvasPage *paint_canvas_page_new (PaintDocument *doc, PaintToolSettings *s
 
 PaintCanvas *paint_canvas_page_get_canvas (PaintCanvasPage *self);
 void paint_canvas_page_select_tool (PaintCanvasPage *self, const char *tool_id);
+void paint_canvas_page_select_last_shape (PaintCanvasPage *self);
 void paint_canvas_page_set_brush_size (PaintCanvasPage *self, double size);
 void paint_canvas_page_adjust_brush_size (PaintCanvasPage *self, double delta);
 void paint_canvas_page_toggle_osd (PaintCanvasPage *self);

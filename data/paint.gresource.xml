@@ -7,5 +7,14 @@
     <file>icons/scalable/actions/tool-eraser-symbolic.svg</file>
     <file>icons/scalable/actions/tool-fill-symbolic.svg</file>
     <file>icons/scalable/actions/tool-line-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shapes-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-rect-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-rounded-rect-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-ellipse-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-triangle-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-diamond-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-hexagon-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-star-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-arrow-symbolic.svg</file>
   </gresource>
 </gresources>

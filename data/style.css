@@ -69,6 +69,31 @@
     font-variant-numeric: tabular-nums;
 }
 
+.paint-osd-pill .paint-shapes-button > button {
+    padding-left: 8px;
+    padding-right: 6px;
+}
+
+.paint-osd-pill .paint-shapes-button.paint-tool-active > button {
+    background-color: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+.paint-shape-tile {
+    min-width: 66px;
+    min-height: 54px;
+    padding: 6px 4px;
+    border-radius: 10px;
+}
+
+.paint-shape-tile:checked {
+    background-color: color-mix(in srgb, var(--accent-bg-color) 18%, transparent);
+    color: var(--accent-color);
+}
+
+.paint-shape-tile label {
+    font-size: 0.78em;
+}
+
 .paint-menu-zoom-row {
     padding: 4px 8px;
 }

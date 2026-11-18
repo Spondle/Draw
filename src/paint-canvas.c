@@ -507,6 +507,32 @@ compute_stroke_bounds (double x0,
   *rh = (int) ceil (max_y - min_y) + pad * 2 + 2;
 }
 
+static void
+compute_tool_stroke_bounds (const PaintTool *tool,
+                            const PaintToolSettings *settings,
+                            double x0,
+                            double y0,
+                            double x1,
+                            double y1,
+                            int *rx,
+                            int *ry,
+                            int *rw,
+                            int *rh)
+{
+  if (tool && tool->get_bounds) {
+    double bx0, by0, bx1, by1;
+    tool->get_bounds (tool, x0, y0, x1, y1, settings, &bx0, &by0, &bx1, &by1);
+    *rx = (int) floor (bx0) - 4;
+    *ry = (int) floor (by0) - 4;
+    *rw = (int) ceil (bx1 - bx0) + 10;
+    *rh = (int) ceil (by1 - by0) + 10;
+    return;
+  }
+
+  double stroke_size = (tool && tool->uses_brush_size) ? settings->size : 1.0;
+  compute_stroke_bounds (x0, y0, x1, y1, stroke_size, rx, ry, rw, rh);
+}
+
 void
 paint_document_begin_stroke (PaintDocument *doc,
                              double x,
@@ -614,9 +640,8 @@ paint_document_end_stroke (PaintDocument *doc,
 {
   if (tool->draw_preview) {
     int rx, ry, rw, rh;
-    double stroke_size = tool->uses_brush_size ? settings->size : 1.0;
-    compute_stroke_bounds (doc->stroke_start_x, doc->stroke_start_y, x, y,
-                           stroke_size, &rx, &ry, &rw, &rh);
+    compute_tool_stroke_bounds (tool, settings, doc->stroke_start_x, doc->stroke_start_y,
+                                x, y, &rx, &ry, &rw, &rh);
 
     UndoStep *step = undo_step_new_tiled (doc->width, doc->height);
     undo_step_capture_rect (step, doc->surface, rx, ry, rw, rh);
@@ -1445,8 +1470,8 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
     double y1 = self->preview_end_y;
 
     int rx, ry, rw, rh;
-    double stroke_size = active_tool->uses_brush_size ? self->settings->size : 1.0;
-    compute_stroke_bounds (x0, y0, x1, y1, stroke_size, &rx, &ry, &rw, &rh);
+    compute_tool_stroke_bounds (active_tool, self->settings, x0, y0, x1, y1,
+                                &rx, &ry, &rw, &rh);
 
     int vis_x0 = MAX (0, (int) floor (vis_rect.origin.x / self->zoom) - 4);
     int vis_y0 = MAX (0, (int) floor (vis_rect.origin.y / self->zoom) - 4);

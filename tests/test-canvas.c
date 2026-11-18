@@ -427,6 +427,86 @@ test_line_tool_tiled_undo_cancel_and_snap (void)
   paint_document_free (doc);
 }
 
+static void
+test_shapes_outline_filled_snap_and_undo (void)
+{
+  PaintDocument *doc = paint_document_new (200, 200);
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->color = (GdkRGBA) { 1.0f, 0.0f, 0.0f, 1.0f };
+  settings->size = 6.0;
+
+  /* 1. Outline rectangle: border colored, center stays white */
+  const PaintTool *rect = paint_tools_find ("shape-rectangle");
+  g_assert_cmpstr (rect->id, ==, "shape-rectangle");
+  g_assert_true (rect->is_shape);
+  settings->shape_filled = FALSE;
+
+  paint_document_begin_stroke (doc, 20.0, 20.0, rect, settings);
+  paint_document_continue_stroke (doc, 180.0, 180.0, rect, settings);
+  paint_document_end_stroke (doc, 80.0, 60.0, rect, settings);
+
+  guint8 r, g, b, a;
+  read_pixel_rgba (doc, 50, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 0);
+  read_pixel_rgba (doc, 50, 40, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+
+  /* Undo restores rectangle border to white */
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 50, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+
+  /* 2. Filled star: center is colored, undo restores */
+  const PaintTool *star = paint_tools_find ("shape-star");
+  g_assert_cmpstr (star->id, ==, "shape-star");
+  settings->color = (GdkRGBA) { 0.0f, 0.0f, 1.0f, 1.0f };
+  settings->shape_filled = TRUE;
+
+  paint_document_begin_stroke (doc, 40.0, 40.0, star, settings);
+  paint_document_end_stroke (doc, 140.0, 140.0, star, settings);
+  read_pixel_rgba (doc, 90, 90, &r, &g, &b, &a);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_cmpuint (r, ==, 0);
+
+  /* 3. Filled circle (ellipse + Shift square snap) */
+  double sx = 180.0, sy = 140.0;
+  const PaintTool *ellipse = paint_tools_find ("shape-ellipse");
+  ellipse->snap_point (100.0, 100.0, &sx, &sy);
+  g_assert_cmpfloat_with_epsilon (sx, 180.0, 1e-6);
+  g_assert_cmpfloat_with_epsilon (sy, 180.0, 1e-6);
+
+  /* 4. Horizontal arrow across y=100: wings extend above/below and must undo cleanly */
+  const PaintTool *arrow = paint_tools_find ("shape-arrow");
+  settings->shape_filled = FALSE;
+  settings->size = 6.0;
+  paint_document_begin_stroke (doc, 20.0, 100.0, arrow, settings);
+  paint_document_end_stroke (doc, 160.0, 100.0, arrow, settings);
+  read_pixel_rgba (doc, 150, 100, &r, &g, &b, &a);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_cmpuint (r, ==, 0);
+
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 150, 100, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+
+  /* 5. Clear canvas clears star and can be undone */
+  paint_document_clear (doc);
+  read_pixel_rgba (doc, 90, 90, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 90, 90, &r, &g, &b, &a);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_cmpuint (r, ==, 0);
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -441,5 +521,6 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/cancel_stroke_restores_without_undo", test_cancel_stroke_restores_without_undo);
   g_test_add_func ("/canvas/line_tool_and_undo_redo", test_line_tool_and_undo_redo);
   g_test_add_func ("/canvas/line_tool_tiled_undo_cancel_and_snap", test_line_tool_tiled_undo_cancel_and_snap);
+  g_test_add_func ("/canvas/shapes_outline_filled_snap_and_undo", test_shapes_outline_filled_snap_and_undo);
   return g_test_run ();
 }

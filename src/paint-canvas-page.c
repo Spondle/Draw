@@ -44,6 +44,15 @@ struct _PaintCanvasPage {
   GtkWidget *osd_pill;
   GtkWidget *undo_btn;
   GtkWidget *redo_btn;
+  GtkWidget *clear_btn;
+  GtkWidget *shapes_btn;
+  GtkWidget *shapes_btn_icon;
+  GtkWidget *shapes_popover;
+  GtkWidget *shape_outline_btn;
+  GtkWidget *shape_fill_btn;
+  GtkToggleButton *dummy_primary_btn;
+  GtkToggleButton *dummy_shape_btn;
+  const char *last_shape_tool_id;
   GtkWidget *size_btn;
   GtkScale *size_scale;
   GtkWidget *color_btn;
@@ -205,6 +214,34 @@ on_canvas_zoom_changed (PaintCanvas *canvas G_GNUC_UNUSED,
 }
 
 static void
+sync_tool_ui (PaintCanvasPage *self, const PaintTool *tool)
+{
+  if (!tool)
+    return;
+
+  self->syncing = TRUE;
+  if (tool->is_shape) {
+    self->last_shape_tool_id = tool->id;
+    if (self->dummy_primary_btn)
+      gtk_toggle_button_set_active (self->dummy_primary_btn, TRUE);
+    if (self->shapes_btn_icon)
+      gtk_image_set_from_icon_name (GTK_IMAGE (self->shapes_btn_icon), tool->icon_name);
+    if (self->shapes_btn)
+      gtk_widget_add_css_class (self->shapes_btn, "paint-tool-active");
+  } else {
+    if (self->dummy_shape_btn)
+      gtk_toggle_button_set_active (self->dummy_shape_btn, TRUE);
+    if (self->shapes_btn)
+      gtk_widget_remove_css_class (self->shapes_btn, "paint-tool-active");
+  }
+
+  GtkToggleButton *active_btn = g_hash_table_lookup (self->tool_buttons, tool->id);
+  if (active_btn && !gtk_toggle_button_get_active (active_btn))
+    gtk_toggle_button_set_active (active_btn, TRUE);
+  self->syncing = FALSE;
+}
+
+static void
 on_tool_toggled (GtkToggleButton *btn, gpointer user_data)
 {
   PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
@@ -213,7 +250,28 @@ on_tool_toggled (GtkToggleButton *btn, gpointer user_data)
   const char *tool_id = g_object_get_data (G_OBJECT (btn), "paint-tool-id");
   if (tool_id) {
     self->settings->active_tool_id = tool_id;
+    const PaintTool *tool = paint_tools_find (tool_id);
+    sync_tool_ui (self, tool);
+    if (tool->is_shape && self->shapes_popover)
+      gtk_popover_popdown (GTK_POPOVER (self->shapes_popover));
     gtk_widget_queue_draw (GTK_WIDGET (self->canvas));
+  }
+}
+
+static void
+on_shape_mode_toggled (GtkToggleButton *btn G_GNUC_UNUSED, gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  if (self->syncing)
+    return;
+  self->settings->shape_filled =
+    self->shape_fill_btn && gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (self->shape_fill_btn));
+
+  /* Selecting Outline/Filled switches right into the active or last shape tool */
+  const PaintTool *cur = paint_tools_find (self->settings->active_tool_id);
+  if (!cur->is_shape) {
+    const char *shape_id = self->last_shape_tool_id ? self->last_shape_tool_id : "shape-rectangle";
+    paint_canvas_page_select_tool (self, shape_id);
   }
 }
 
@@ -913,6 +971,102 @@ build_size_popover (PaintCanvasPage *self)
   return GTK_POPOVER (pop);
 }
 
+static GtkPopover *
+build_shapes_popover (PaintCanvasPage *self)
+{
+  GtkWidget *pop = gtk_popover_new ();
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
+  gtk_widget_set_margin_top (box, 10);
+  gtk_widget_set_margin_bottom (box, 10);
+  gtk_widget_set_margin_start (box, 12);
+  gtk_widget_set_margin_end (box, 12);
+
+  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  GtkWidget *heading = gtk_label_new ("Shapes");
+  gtk_widget_add_css_class (heading, "heading");
+  gtk_widget_set_halign (heading, GTK_ALIGN_START);
+  gtk_widget_set_hexpand (heading, TRUE);
+  gtk_box_append (GTK_BOX (header), heading);
+
+  GtkWidget *mode_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class (mode_box, "linked");
+
+  self->shape_outline_btn = gtk_toggle_button_new_with_label ("Outline");
+  self->shape_fill_btn = gtk_toggle_button_new_with_label ("Filled");
+  gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (self->shape_fill_btn),
+                               GTK_TOGGLE_BUTTON (self->shape_outline_btn));
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->shape_outline_btn),
+                                !self->settings->shape_filled);
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->shape_fill_btn),
+                                self->settings->shape_filled);
+  g_signal_connect (self->shape_outline_btn, "toggled", G_CALLBACK (on_shape_mode_toggled), self);
+  g_signal_connect (self->shape_fill_btn, "toggled", G_CALLBACK (on_shape_mode_toggled), self);
+  gtk_box_append (GTK_BOX (mode_box), self->shape_outline_btn);
+  gtk_box_append (GTK_BOX (mode_box), self->shape_fill_btn);
+  gtk_box_append (GTK_BOX (header), mode_box);
+  gtk_box_append (GTK_BOX (box), header);
+
+  GtkWidget *grid = gtk_grid_new ();
+  gtk_grid_set_row_spacing (GTK_GRID (grid), 4);
+  gtk_grid_set_column_spacing (GTK_GRID (grid), 4);
+
+  gsize n_tools = 0;
+  const PaintTool *tools = paint_tools_get_all (&n_tools);
+  GtkToggleButton *first_shape = NULL;
+  int idx = 0;
+  for (gsize i = 0; i < n_tools; i++) {
+    if (!tools[i].is_shape)
+      continue;
+
+    GtkWidget *btn = gtk_toggle_button_new ();
+    gtk_widget_add_css_class (btn, "flat");
+    gtk_widget_add_css_class (btn, "paint-shape-tile");
+    gtk_widget_set_tooltip_text (btn, tools[i].tooltip);
+
+    GtkWidget *tile = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_halign (tile, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign (tile, GTK_ALIGN_CENTER);
+    GtkWidget *img = gtk_image_new_from_icon_name (tools[i].icon_name);
+    gtk_image_set_pixel_size (GTK_IMAGE (img), 20);
+    GtkWidget *lbl = gtk_label_new (tools[i].name);
+    gtk_box_append (GTK_BOX (tile), img);
+    gtk_box_append (GTK_BOX (tile), lbl);
+    gtk_button_set_child (GTK_BUTTON (btn), tile);
+
+    if (!first_shape)
+      first_shape = GTK_TOGGLE_BUTTON (btn);
+    else
+      gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (btn), first_shape);
+
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (btn),
+                                  g_strcmp0 (tools[i].id, self->settings->active_tool_id) == 0);
+    g_object_set_data (G_OBJECT (btn), "paint-tool-id", (gpointer) tools[i].id);
+    g_signal_connect (btn, "toggled", G_CALLBACK (on_tool_toggled), self);
+    g_hash_table_insert (self->tool_buttons, (gpointer) tools[i].id, btn);
+
+    gtk_grid_attach (GTK_GRID (grid), btn, idx % 4, idx / 4, 1, 1);
+    idx++;
+  }
+
+  GtkWidget *dummy_shape = gtk_toggle_button_new ();
+  gtk_widget_set_visible (dummy_shape, FALSE);
+  if (first_shape)
+    gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (dummy_shape), first_shape);
+  gtk_box_append (GTK_BOX (box), dummy_shape);
+  self->dummy_shape_btn = GTK_TOGGLE_BUTTON (dummy_shape);
+
+  gtk_box_append (GTK_BOX (box), grid);
+
+  GtkWidget *hint = gtk_label_new ("Hold Shift while dragging to constrain proportions");
+  gtk_widget_add_css_class (hint, "paint-dim-label");
+  gtk_widget_set_halign (hint, GTK_ALIGN_START);
+  gtk_box_append (GTK_BOX (box), hint);
+
+  gtk_popover_set_child (GTK_POPOVER (pop), box);
+  self->shapes_popover = pop;
+  return GTK_POPOVER (pop);
+}
+
 static void
 on_adjustment_changed (GtkAdjustment *adj G_GNUC_UNUSED, gpointer user_data)
 {
@@ -1021,6 +1175,8 @@ build_ui (PaintCanvasPage *self)
   const PaintTool *tools = paint_tools_get_all (&n_tools);
   GtkToggleButton *first_btn = NULL;
   for (gsize i = 0; i < n_tools; i++) {
+    if (tools[i].is_shape)
+      continue;
     GtkWidget *btn = gtk_toggle_button_new ();
     gtk_button_set_icon_name (GTK_BUTTON (btn), tools[i].icon_name);
     gtk_widget_add_css_class (btn, "flat");
@@ -1037,6 +1193,31 @@ build_ui (PaintCanvasPage *self)
     gtk_box_append (GTK_BOX (tools_box), btn);
     g_hash_table_insert (self->tool_buttons, (gpointer) tools[i].id, btn);
   }
+
+  GtkWidget *dummy_primary = gtk_toggle_button_new ();
+  gtk_widget_set_visible (dummy_primary, FALSE);
+  if (first_btn)
+    gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (dummy_primary), first_btn);
+  gtk_box_append (GTK_BOX (tools_box), dummy_primary);
+  self->dummy_primary_btn = GTK_TOGGLE_BUTTON (dummy_primary);
+
+  GtkWidget *shapes_content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
+  self->shapes_btn_icon = gtk_image_new_from_icon_name ("tool-shapes-symbolic");
+  GtkWidget *shapes_arrow = gtk_image_new_from_icon_name ("pan-down-symbolic");
+  gtk_image_set_pixel_size (GTK_IMAGE (shapes_arrow), 12);
+  gtk_widget_set_opacity (shapes_arrow, 0.75);
+  gtk_box_append (GTK_BOX (shapes_content), self->shapes_btn_icon);
+  gtk_box_append (GTK_BOX (shapes_content), shapes_arrow);
+
+  self->shapes_btn = gtk_menu_button_new ();
+  gtk_widget_add_css_class (self->shapes_btn, "flat");
+  gtk_widget_add_css_class (self->shapes_btn, "paint-shapes-button");
+  gtk_menu_button_set_child (GTK_MENU_BUTTON (self->shapes_btn), shapes_content);
+  gtk_widget_set_tooltip_text (self->shapes_btn, "Shapes (S)");
+  gtk_menu_button_set_popover (GTK_MENU_BUTTON (self->shapes_btn),
+                                GTK_WIDGET (build_shapes_popover (self)));
+  gtk_box_append (GTK_BOX (tools_box), self->shapes_btn);
+
   gtk_box_append (GTK_BOX (pill), tools_box);
 
   gtk_box_append (GTK_BOX (pill), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
@@ -1062,6 +1243,14 @@ build_ui (PaintCanvasPage *self)
   gtk_widget_set_tooltip_text (self->color_btn, "Brush Color");
   gtk_menu_button_set_popover (GTK_MENU_BUTTON (self->color_btn), GTK_WIDGET (build_color_popover (self)));
   gtk_box_append (GTK_BOX (pill), self->color_btn);
+
+  gtk_box_append (GTK_BOX (pill), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
+
+  self->clear_btn = gtk_button_new_from_icon_name ("edit-clear-all-symbolic");
+  gtk_widget_add_css_class (self->clear_btn, "flat");
+  gtk_widget_set_tooltip_text (self->clear_btn, "Clear Canvas");
+  gtk_actionable_set_action_name (GTK_ACTIONABLE (self->clear_btn), "win.clear");
+  gtk_box_append (GTK_BOX (pill), self->clear_btn);
 
   self->osd_pill = pill;
   gtk_overlay_add_overlay (self->overlay, pill);
@@ -1096,6 +1285,7 @@ paint_canvas_page_init (PaintCanvasPage *self)
 {
   self->tool_buttons = g_hash_table_new (g_str_hash, g_str_equal);
   self->last_zoom = 1.0;
+  self->last_shape_tool_id = "shape-rectangle";
 }
 
 PaintCanvasPage *
@@ -1122,6 +1312,13 @@ paint_canvas_page_select_tool (PaintCanvasPage *self, const char *tool_id)
   GtkToggleButton *btn = g_hash_table_lookup (self->tool_buttons, tool_id);
   if (btn)
     gtk_toggle_button_set_active (btn, TRUE);
+}
+
+void
+paint_canvas_page_select_last_shape (PaintCanvasPage *self)
+{
+  const char *shape_id = self->last_shape_tool_id ? self->last_shape_tool_id : "shape-rectangle";
+  paint_canvas_page_select_tool (self, shape_id);
 }
 
 void
@@ -1162,11 +1359,16 @@ paint_canvas_page_sync_controls (PaintCanvasPage *self)
   gtk_widget_set_sensitive (self->undo_btn, paint_document_can_undo (doc));
   gtk_widget_set_sensitive (self->redo_btn, paint_document_can_redo (doc));
 
+  const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
+  sync_tool_ui (self, active_tool);
+
   self->syncing = TRUE;
-  GtkToggleButton *active_btn = g_hash_table_lookup (self->tool_buttons,
-                                                     self->settings->active_tool_id);
-  if (active_btn && !gtk_toggle_button_get_active (active_btn))
-    gtk_toggle_button_set_active (active_btn, TRUE);
+  if (self->shape_outline_btn && self->shape_fill_btn) {
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->shape_outline_btn),
+                                  !self->settings->shape_filled);
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->shape_fill_btn),
+                                  self->settings->shape_filled);
+  }
 
   gtk_range_set_value (GTK_RANGE (self->size_scale), self->settings->size);
   g_autofree char *lbl = g_strdup_printf ("%d px", (int) lround (self->settings->size));

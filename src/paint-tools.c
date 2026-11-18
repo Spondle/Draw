@@ -460,7 +460,7 @@ line_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
 }
 
 static void
-line_end_stroke (const PaintTool *tool G_GNUC_UNUSED,
+line_end_stroke (const PaintTool *tool,
                  cairo_t *cr,
                  double x,
                  double y,
@@ -474,7 +474,7 @@ line_end_stroke (const PaintTool *tool G_GNUC_UNUSED,
     x0 = start.x;
     y0 = start.y;
   }
-  draw_straight_line (cr, x0, y0, x, y, settings);
+  tool->draw_preview (tool, cr, x0, y0, x, y, settings);
   g_array_set_size (pts, 0);
 }
 
@@ -515,6 +515,243 @@ line_snap_point (double x0, double y0, double *x1, double *y1)
   double proj = dx * ux + dy * uy;
   *x1 = x0 + proj * ux;
   *y1 = y0 + proj * uy;
+}
+
+static void
+shape_snap_square (double x0, double y0, double *x1, double *y1)
+{
+  double dx = *x1 - x0;
+  double dy = *y1 - y0;
+  double side = MAX (fabs (dx), fabs (dy));
+  *x1 = x0 + (dx < 0.0 ? -side : side);
+  *y1 = y0 + (dy < 0.0 ? -side : side);
+}
+
+static void
+build_polygon_path (cairo_t *cr,
+                    double cx,
+                    double cy,
+                    double rx,
+                    double ry,
+                    int sides,
+                    double inner_ratio)
+{
+  int total = (inner_ratio > 0.0) ? sides * 2 : sides;
+  double step = (2.0 * G_PI) / (double) total;
+  for (int i = 0; i < total; i++) {
+    double a = -G_PI_2 + (double) i * step;
+    double frac = (inner_ratio > 0.0 && (i % 2 == 1)) ? inner_ratio : 1.0;
+    double px = cx + rx * frac * cos (a);
+    double py = cy + ry * frac * sin (a);
+    if (i == 0)
+      cairo_move_to (cr, px, py);
+    else
+      cairo_line_to (cr, px, py);
+  }
+  cairo_close_path (cr);
+}
+
+static void
+build_rounded_rect_path (cairo_t *cr, double x, double y, double w, double h, double r)
+{
+  double radius = MIN (r, MIN (w, h) * 0.5);
+  cairo_new_sub_path (cr);
+  cairo_arc (cr, x + w - radius, y + radius, radius, -G_PI_2, 0.0);
+  cairo_arc (cr, x + w - radius, y + h - radius, radius, 0.0, G_PI_2);
+  cairo_arc (cr, x + radius, y + h - radius, radius, G_PI_2, G_PI);
+  cairo_arc (cr, x + radius, y + radius, radius, G_PI, 3.0 * G_PI_2);
+  cairo_close_path (cr);
+}
+
+static void
+finish_shape_path (cairo_t *cr,
+                   const PaintToolSettings *settings,
+                   cairo_line_join_t join)
+{
+  configure_brush_context (cr, settings);
+  if (settings->shape_filled) {
+    cairo_fill (cr);
+  } else {
+    cairo_set_line_width (cr, MAX (1.0, settings->size));
+    cairo_set_line_join (cr, join);
+    cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+    cairo_stroke (cr);
+  }
+}
+
+static void
+arrow_compute_head (double len,
+                    const PaintToolSettings *settings,
+                    double *out_head_len,
+                    double *out_wing_w)
+{
+  double head_len = CLAMP (len * 0.3, MAX (10.0, settings->size * 2.5), 48.0);
+  if (head_len > len * 0.6)
+    head_len = len * 0.6;
+  *out_head_len = head_len;
+  *out_wing_w = head_len * 0.6;
+}
+
+static void
+shape_draw_arrow (cairo_t *cr,
+                  double x0,
+                  double y0,
+                  double x1,
+                  double y1,
+                  const PaintToolSettings *settings)
+{
+  double dx = x1 - x0;
+  double dy = y1 - y0;
+  double len = hypot (dx, dy);
+  if (len < 1e-6) {
+    draw_straight_line (cr, x0, y0, x1, y1, settings);
+    return;
+  }
+
+  double ux = dx / len;
+  double uy = dy / len;
+  double nx = -uy;
+  double ny = ux;
+
+  double head_len, wing_w;
+  arrow_compute_head (len, settings, &head_len, &wing_w);
+  double hx = x1 - ux * head_len;
+  double hy = y1 - uy * head_len;
+
+  configure_brush_context (cr, settings);
+  if (settings->shape_filled) {
+    double shaft_w = MAX (2.0, MIN (wing_w * 0.42, settings->size * 0.75));
+    cairo_move_to (cr, x0 + nx * shaft_w, y0 + ny * shaft_w);
+    cairo_line_to (cr, hx + nx * shaft_w, hy + ny * shaft_w);
+    cairo_line_to (cr, hx + nx * wing_w, hy + ny * wing_w);
+    cairo_line_to (cr, x1, y1);
+    cairo_line_to (cr, hx - nx * wing_w, hy - ny * wing_w);
+    cairo_line_to (cr, hx - nx * shaft_w, hy - ny * shaft_w);
+    cairo_line_to (cr, x0 - nx * shaft_w, y0 - ny * shaft_w);
+    cairo_close_path (cr);
+    cairo_fill (cr);
+  } else {
+    cairo_set_line_width (cr, MAX (1.0, settings->size));
+    cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join (cr, CAIRO_LINE_JOIN_ROUND);
+    cairo_move_to (cr, x0, y0);
+    cairo_line_to (cr, x1, y1);
+    cairo_stroke (cr);
+
+    cairo_move_to (cr, hx + nx * wing_w, hy + ny * wing_w);
+    cairo_line_to (cr, x1, y1);
+    cairo_line_to (cr, hx - nx * wing_w, hy - ny * wing_w);
+    cairo_stroke (cr);
+  }
+}
+
+static void
+shape_draw_preview (const PaintTool *tool,
+                    cairo_t *cr,
+                    double x0,
+                    double y0,
+                    double x1,
+                    double y1,
+                    const PaintToolSettings *settings)
+{
+  if (g_strcmp0 (tool->id, "shape-arrow") == 0) {
+    shape_draw_arrow (cr, x0, y0, x1, y1, settings);
+    return;
+  }
+
+  double bx = MIN (x0, x1);
+  double by = MIN (y0, y1);
+  double bw = fabs (x1 - x0);
+  double bh = fabs (y1 - y0);
+  if (bw < 1e-3 && bh < 1e-3) {
+    draw_straight_line (cr, x0, y0, x1, y1, settings);
+    return;
+  }
+  if (bw < 1e-3 || bh < 1e-3) {
+    draw_straight_line (cr, bx, by, bx + bw, by + bh, settings);
+    return;
+  }
+
+  double cx = bx + bw * 0.5;
+  double cy = by + bh * 0.5;
+  double rx = bw * 0.5;
+  double ry = bh * 0.5;
+
+  if (g_strcmp0 (tool->id, "shape-rectangle") == 0) {
+    cairo_rectangle (cr, bx, by, bw, bh);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
+  } else if (g_strcmp0 (tool->id, "shape-rounded-rect") == 0) {
+    double r = MIN (MIN (bw, bh) * 0.2, MAX (8.0, settings->size * 1.5));
+    build_rounded_rect_path (cr, bx, by, bw, bh, r);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
+  } else if (g_strcmp0 (tool->id, "shape-ellipse") == 0) {
+    cairo_save (cr);
+    cairo_translate (cr, cx, cy);
+    cairo_scale (cr, rx, ry);
+    cairo_arc (cr, 0.0, 0.0, 1.0, 0.0, 2.0 * G_PI);
+    cairo_restore (cr);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
+  } else if (g_strcmp0 (tool->id, "shape-triangle") == 0) {
+    cairo_move_to (cr, cx, by);
+    cairo_line_to (cr, bx + bw, by + bh);
+    cairo_line_to (cr, bx, by + bh);
+    cairo_close_path (cr);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
+  } else if (g_strcmp0 (tool->id, "shape-diamond") == 0) {
+    cairo_move_to (cr, cx, by);
+    cairo_line_to (cr, bx + bw, cy);
+    cairo_line_to (cr, cx, by + bh);
+    cairo_line_to (cr, bx, cy);
+    cairo_close_path (cr);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
+  } else if (g_strcmp0 (tool->id, "shape-hexagon") == 0) {
+    build_polygon_path (cr, cx, cy, rx, ry, 6, 0.0);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
+  } else if (g_strcmp0 (tool->id, "shape-star") == 0) {
+    build_polygon_path (cr, cx, cy, rx, ry, 5, 0.38196601125);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
+  }
+}
+
+static void
+polygon_get_bounds (const PaintTool *tool G_GNUC_UNUSED,
+                    double x0,
+                    double y0,
+                    double x1,
+                    double y1,
+                    const PaintToolSettings *settings,
+                    double *out_x0,
+                    double *out_y0,
+                    double *out_x1,
+                    double *out_y1)
+{
+  double pad = settings->shape_filled ? 2.0 : MAX (2.0, settings->size * 2.0);
+  *out_x0 = MIN (x0, x1) - pad;
+  *out_y0 = MIN (y0, y1) - pad;
+  *out_x1 = MAX (x0, x1) + pad;
+  *out_y1 = MAX (y0, y1) + pad;
+}
+
+static void
+arrow_get_bounds (const PaintTool *tool G_GNUC_UNUSED,
+                  double x0,
+                  double y0,
+                  double x1,
+                  double y1,
+                  const PaintToolSettings *settings,
+                  double *out_x0,
+                  double *out_y0,
+                  double *out_x1,
+                  double *out_y1)
+{
+  double len = hypot (x1 - x0, y1 - y0);
+  double head_len, wing_w;
+  arrow_compute_head (len, settings, &head_len, &wing_w);
+  double pad = wing_w + MAX (2.0, settings->size);
+  *out_x0 = MIN (x0, x1) - pad;
+  *out_y0 = MIN (y0, y1) - pad;
+  *out_x1 = MAX (x0, x1) + pad;
+  *out_y1 = MAX (y0, y1) + pad;
 }
 
 static const PaintTool BUILTIN_TOOLS[] = {
@@ -559,6 +796,118 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .begin_stroke = fill_begin_stroke,
     .continue_stroke = fill_noop,
     .end_stroke = fill_noop,
+  },
+  {
+    .id = "shape-rectangle",
+    .name = "Rectangle",
+    .icon_name = "tool-shape-rect-symbolic",
+    .tooltip = "Rectangle · Hold Shift for square",
+    .uses_brush_size = TRUE,
+    .is_shape = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = shape_draw_preview,
+    .snap_point = shape_snap_square,
+    .get_bounds = polygon_get_bounds,
+  },
+  {
+    .id = "shape-rounded-rect",
+    .name = "Rounded",
+    .icon_name = "tool-shape-rounded-rect-symbolic",
+    .tooltip = "Rounded Rectangle · Hold Shift for square",
+    .uses_brush_size = TRUE,
+    .is_shape = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = shape_draw_preview,
+    .snap_point = shape_snap_square,
+    .get_bounds = polygon_get_bounds,
+  },
+  {
+    .id = "shape-ellipse",
+    .name = "Circle",
+    .icon_name = "tool-shape-ellipse-symbolic",
+    .tooltip = "Ellipse / Circle · Hold Shift for circle",
+    .uses_brush_size = TRUE,
+    .is_shape = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = shape_draw_preview,
+    .snap_point = shape_snap_square,
+    .get_bounds = polygon_get_bounds,
+  },
+  {
+    .id = "shape-triangle",
+    .name = "Triangle",
+    .icon_name = "tool-shape-triangle-symbolic",
+    .tooltip = "Triangle · Hold Shift for 1:1 proportions",
+    .uses_brush_size = TRUE,
+    .is_shape = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = shape_draw_preview,
+    .snap_point = shape_snap_square,
+    .get_bounds = polygon_get_bounds,
+  },
+  {
+    .id = "shape-diamond",
+    .name = "Diamond",
+    .icon_name = "tool-shape-diamond-symbolic",
+    .tooltip = "Diamond · Hold Shift for 1:1 proportions",
+    .uses_brush_size = TRUE,
+    .is_shape = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = shape_draw_preview,
+    .snap_point = shape_snap_square,
+    .get_bounds = polygon_get_bounds,
+  },
+  {
+    .id = "shape-hexagon",
+    .name = "Hexagon",
+    .icon_name = "tool-shape-hexagon-symbolic",
+    .tooltip = "Hexagon · Hold Shift for regular hexagon",
+    .uses_brush_size = TRUE,
+    .is_shape = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = shape_draw_preview,
+    .snap_point = shape_snap_square,
+    .get_bounds = polygon_get_bounds,
+  },
+  {
+    .id = "shape-star",
+    .name = "Star",
+    .icon_name = "tool-shape-star-symbolic",
+    .tooltip = "Star · Hold Shift for symmetric star",
+    .uses_brush_size = TRUE,
+    .is_shape = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = shape_draw_preview,
+    .snap_point = shape_snap_square,
+    .get_bounds = polygon_get_bounds,
+  },
+  {
+    .id = "shape-arrow",
+    .name = "Arrow",
+    .icon_name = "tool-shape-arrow-symbolic",
+    .tooltip = "Arrow · Hold Shift to snap angle",
+    .uses_brush_size = TRUE,
+    .is_shape = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = shape_draw_preview,
+    .snap_point = line_snap_point,
+    .get_bounds = arrow_get_bounds,
   },
 };
 

@@ -978,6 +978,13 @@ static void act_tool_fill (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UN
     paint_canvas_page_select_tool (page, "fill");
 }
 
+static void act_tool_shape (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UNUSED, gpointer d)
+{
+  PaintCanvasPage *page = get_active_canvas_page (PAINT_WINDOW (d));
+  if (page)
+    paint_canvas_page_select_last_shape (page);
+}
+
 static void act_brush_smaller (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UNUSED, gpointer d)
 {
   PaintCanvasPage *page = get_active_canvas_page (PAINT_WINDOW (d));
@@ -1025,6 +1032,10 @@ on_key_pressed (GtkEventControllerKey *ctrl G_GNUC_UNUSED,
   }
   if (keyval == GDK_KEY_f || keyval == GDK_KEY_F) {
     gtk_widget_activate_action (GTK_WIDGET (self), "win.tool-fill", NULL);
+    return TRUE;
+  }
+  if (keyval == GDK_KEY_s || keyval == GDK_KEY_S) {
+    gtk_widget_activate_action (GTK_WIDGET (self), "win.tool-shape", NULL);
     return TRUE;
   }
   if (keyval == GDK_KEY_bracketleft) {
@@ -1379,6 +1390,7 @@ paint_window_init (PaintWindow *self)
     { "tool-line", act_tool_line, NULL, NULL, NULL, { 0 } },
     { "tool-eraser", act_tool_eraser, NULL, NULL, NULL, { 0 } },
     { "tool-fill", act_tool_fill, NULL, NULL, NULL, { 0 } },
+    { "tool-shape", act_tool_shape, NULL, NULL, NULL, { 0 } },
     { "brush-smaller", act_brush_smaller, NULL, NULL, NULL, { 0 } },
     { "brush-larger", act_brush_larger, NULL, NULL, NULL, { 0 } },
   };
