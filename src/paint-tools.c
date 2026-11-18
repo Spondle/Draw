@@ -5,7 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FILL_TOLERANCE 24
+#define FILL_TOLERANCE 72
+#define FILL_FRINGE_MAX_DIST 185
+#define FILL_COLLINEAR_ERR 18
 
 PaintToolSettings *
 paint_tool_settings_new (void)
@@ -161,6 +163,51 @@ pixel_matches (uint32_t px, uint32_t target, int tol)
          abs (b1 - b0) <= tol;
 }
 
+static inline int
+pixel_max_diff (uint32_t px, uint32_t target)
+{
+  int da = abs ((int) ((px >> 24) & 0xFF) - (int) ((target >> 24) & 0xFF));
+  int dr = abs ((int) ((px >> 16) & 0xFF) - (int) ((target >> 16) & 0xFF));
+  int dg = abs ((int) ((px >> 8) & 0xFF) - (int) ((target >> 8) & 0xFF));
+  int db = abs ((int) (px & 0xFF) - (int) (target & 0xFF));
+  return MAX (MAX (da, dr), MAX (dg, db));
+}
+
+static inline gboolean
+pixel_is_blend_between (uint32_t px, uint32_t target, uint32_t fill)
+{
+  double ta = (double) ((target >> 24) & 0xFF);
+  double tr = (double) ((target >> 16) & 0xFF);
+  double tg = (double) ((target >> 8) & 0xFF);
+  double tb = (double) (target & 0xFF);
+
+  double da = (double) ((fill >> 24) & 0xFF) - ta;
+  double dr = (double) ((fill >> 16) & 0xFF) - tr;
+  double dg = (double) ((fill >> 8) & 0xFF) - tg;
+  double db = (double) (fill & 0xFF) - tb;
+
+  double len2 = da * da + dr * dr + dg * dg + db * db;
+  if (len2 < 1.0)
+    return FALSE;
+
+  double pa = (double) ((px >> 24) & 0xFF) - ta;
+  double pr = (double) ((px >> 16) & 0xFF) - tr;
+  double pg = (double) ((px >> 8) & 0xFF) - tg;
+  double pb = (double) (px & 0xFF) - tb;
+
+  double t = (pa * da + pr * dr + pg * dg + pb * db) / len2;
+  if (t <= 0.0 || t >= 0.995)
+    return FALSE;
+  if (t > 1.0)
+    t = 1.0;
+
+  double ea = fabs (pa - t * da);
+  double er = fabs (pr - t * dr);
+  double eg = fabs (pg - t * dg);
+  double eb = fabs (pb - t * db);
+  return MAX (MAX (ea, er), MAX (eg, eb)) <= (double) FILL_COLLINEAR_ERR;
+}
+
 static inline uint32_t
 rgba_to_premultiplied_argb32 (const GdkRGBA *c, uint8_t *out_a)
 {
@@ -239,6 +286,11 @@ fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
   FillSeed init = { sx, sy };
   g_array_append_val (stack, init);
 
+  int min_x = sx;
+  int max_x = sx;
+  int min_y = sy;
+  int max_y = sy;
+
   while (stack->len > 0) {
     FillSeed seed = g_array_index (stack, FillSeed, stack->len - 1);
     g_array_set_size (stack, stack->len - 1);
@@ -263,6 +315,11 @@ fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
            pixel_matches (row[right + 1], target_px, FILL_TOLERANCE)) {
       right++;
     }
+
+    if (left < min_x) min_x = left;
+    if (right > max_x) max_x = right;
+    if (row_y < min_y) min_y = row_y;
+    if (row_y > max_y) max_y = row_y;
 
     gboolean span_above = FALSE;
     gboolean span_below = FALSE;
@@ -294,6 +351,61 @@ fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
           span_below = TRUE;
         } else if (span_below && !match) {
           span_below = FALSE;
+        }
+      }
+    }
+  }
+
+  /* Pass 2: smooth/fill 1px anti-aliased fringe adjacent to the filled mask */
+  int y0 = MAX (0, min_y - 1);
+  int y1 = MIN (h - 1, max_y + 1);
+  int x0 = MAX (0, min_x - 1);
+  int x1 = MIN (w - 1, max_x + 1);
+
+  for (int row_y = y0; row_y <= y1; row_y++) {
+    uint32_t *row = (uint32_t *) (data + (gsize) row_y * (gsize) stride);
+    guint8 *vis_row = visited + (gsize) row_y * (gsize) w;
+
+    for (int col = x0; col <= x1; col++) {
+      if (vis_row[col])
+        continue;
+
+      gboolean has_filled_neighbor = FALSE;
+      for (int dy = -1; dy <= 1 && !has_filled_neighbor; dy++) {
+        int ny = row_y + dy;
+        if (ny < 0 || ny >= h)
+          continue;
+        guint8 *nvis = visited + (gsize) ny * (gsize) w;
+        for (int dx = -1; dx <= 1; dx++) {
+          int nx = col + dx;
+          if (nx >= 0 && nx < w && nvis[nx]) {
+            has_filled_neighbor = TRUE;
+            break;
+          }
+        }
+      }
+      if (!has_filled_neighbor)
+        continue;
+
+      uint32_t px = row[col];
+      if (pixel_is_blend_between (px, target_px, fill_px)) {
+        row[col] = blend_over_argb32 (px, fill_px, fill_a);
+      } else {
+        int diff = pixel_max_diff (px, target_px);
+        if (diff <= FILL_FRINGE_MAX_DIST) {
+          double weight = (double) (FILL_FRINGE_MAX_DIST + 10 - diff) /
+                          (double) (FILL_FRINGE_MAX_DIST + 10);
+          uint8_t blend_a = (uint8_t) lround (CLAMP (weight, 0.0, 1.0) * (double) fill_a);
+          if (blend_a > 0) {
+            uint8_t pm_r = (uint8_t) lround (CLAMP (settings->color.red, 0.0f, 1.0f) * blend_a);
+            uint8_t pm_g = (uint8_t) lround (CLAMP (settings->color.green, 0.0f, 1.0f) * blend_a);
+            uint8_t pm_b = (uint8_t) lround (CLAMP (settings->color.blue, 0.0f, 1.0f) * blend_a);
+            uint32_t pm_px = ((uint32_t) blend_a << 24) |
+                             ((uint32_t) pm_r << 16) |
+                             ((uint32_t) pm_g << 8) |
+                             (uint32_t) pm_b;
+            row[col] = blend_over_argb32 (px, pm_px, blend_a);
+          }
         }
       }
     }

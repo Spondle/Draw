@@ -204,6 +204,51 @@ test_fill_tool_and_undo (void)
   paint_document_free (doc);
 }
 
+static void
+test_fill_antialiased_circle_no_halo (void)
+{
+  PaintDocument *doc = paint_document_new (100, 100);
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->color = (GdkRGBA) { 0.11f, 0.44f, 0.96f, 1.0f };
+
+  /* Draw an anti-aliased blue circle */
+  cairo_t *cr = cairo_create (paint_document_get_surface (doc));
+  cairo_set_source_rgba (cr, 0.11, 0.44, 0.96, 1.0);
+  cairo_set_line_width (cr, 8.0);
+  cairo_arc (cr, 50.0, 50.0, 30.0, 0.0, 2.0 * G_PI);
+  cairo_stroke (cr);
+  cairo_destroy (cr);
+
+  /* Fill inside with the same blue */
+  const PaintTool *fill = paint_tools_find ("fill");
+  paint_document_begin_stroke (doc, 50.0, 50.0, fill, settings);
+  paint_document_end_stroke (doc, 50.0, 50.0, fill, settings);
+
+  /* Every pixel inside radius 26 must be solid blue (no white AA fringe) */
+  for (int y = 24; y <= 76; y++) {
+    for (int x = 24; x <= 76; x++) {
+      int dx = x - 50;
+      int dy = y - 50;
+      if (dx * dx + dy * dy <= 28 * 28) {
+        guint8 r, g, b, a;
+        read_pixel_rgba (doc, x, y, &r, &g, &b, &a);
+        g_assert_cmpuint (r, <=, 35);
+        g_assert_cmpuint (b, >=, 240);
+      }
+    }
+  }
+
+  /* Outside the circle must remain pure white */
+  guint8 r, g, b, a;
+  read_pixel_rgba (doc, 5, 5, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -213,5 +258,6 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/eraser_restores_background", test_eraser_restores_background);
   g_test_add_func ("/canvas/resize_and_png_roundtrip", test_resize_and_png_roundtrip);
   g_test_add_func ("/canvas/fill_tool_and_undo", test_fill_tool_and_undo);
+  g_test_add_func ("/canvas/fill_antialiased_circle_no_halo", test_fill_antialiased_circle_no_halo);
   return g_test_run ();
 }
