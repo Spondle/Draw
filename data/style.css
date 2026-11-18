@@ -39,11 +39,28 @@
     min-width: 32px;
 }
 
-.paint-osd-pill colorbutton > button {
+.paint-osd-pill .paint-color-button > button {
     border-radius: 9999px;
     min-height: 30px;
     min-width: 30px;
     padding: 3px;
+}
+
+.paint-color-hex {
+    font-family: monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+.paint-color-alpha-label {
+    min-width: 38px;
+    font-variant-numeric: tabular-nums;
+}
+
+.paint-color-preset {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px;
+    border-radius: 9999px;
 }
 
 .paint-size-button {
