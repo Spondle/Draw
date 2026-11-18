@@ -159,7 +159,17 @@ sync_window_state (PaintWindow *self)
 
   PaintCanvas *canvas = paint_canvas_page_get_canvas (page);
   PaintDocument *doc = paint_canvas_get_document (canvas);
-  int zoom_pct = (int) lround (paint_canvas_get_zoom (canvas) * 100.0);
+  double zoom = paint_canvas_get_zoom (canvas);
+  int zoom_pct = (int) lround (zoom * 100.0);
+
+  GAction *zoom_in_act = g_action_map_lookup_action (G_ACTION_MAP (self), "zoom-in");
+  if (zoom_in_act)
+    g_simple_action_set_enabled (G_SIMPLE_ACTION (zoom_in_act),
+                                 zoom < paint_canvas_get_max_zoom () - 1e-4);
+  GAction *zoom_out_act = g_action_map_lookup_action (G_ACTION_MAP (self), "zoom-out");
+  if (zoom_out_act)
+    g_simple_action_set_enabled (G_SIMPLE_ACTION (zoom_out_act),
+                                 zoom > paint_canvas_get_min_zoom () + 1e-4);
 
   g_autofree char *zoom_str = g_strdup_printf ("%d%%", zoom_pct);
   g_autofree char *dims_str = g_strdup_printf ("%d × %d px",

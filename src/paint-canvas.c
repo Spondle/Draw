@@ -6,7 +6,8 @@
 #define MAX_UNDO_STEPS 40
 
 static const double ZOOM_STEPS[] = {
-  0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0
+  0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.33, 0.5, 0.67, 0.75,
+  1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0
 };
 
 typedef struct {
@@ -703,6 +704,18 @@ double
 paint_canvas_get_zoom (PaintCanvas *self)
 {
   return self->zoom;
+}
+
+double
+paint_canvas_get_min_zoom (void)
+{
+  return ZOOM_STEPS[0];
+}
+
+double
+paint_canvas_get_max_zoom (void)
+{
+  return ZOOM_STEPS[G_N_ELEMENTS (ZOOM_STEPS) - 1];
 }
 
 void

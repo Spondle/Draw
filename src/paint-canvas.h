@@ -62,6 +62,8 @@ void paint_canvas_set_document (PaintCanvas *self, PaintDocument *doc);
 PaintToolSettings *paint_canvas_get_settings (PaintCanvas *self);
 
 double paint_canvas_get_zoom (PaintCanvas *self);
+double paint_canvas_get_min_zoom (void);
+double paint_canvas_get_max_zoom (void);
 void paint_canvas_set_zoom (PaintCanvas *self, double zoom);
 void paint_canvas_zoom_in (PaintCanvas *self);
 void paint_canvas_zoom_out (PaintCanvas *self);

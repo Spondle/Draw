@@ -29,6 +29,7 @@ struct _PaintCanvasPage {
 
   double pan_start_h;
   double pan_start_v;
+  double pinch_start_zoom;
   gboolean syncing;
 };
 
@@ -140,6 +141,24 @@ on_pan_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
                             self->pan_start_v - offset_y);
 }
 
+static void
+on_pinch_begin (GtkGesture *gesture G_GNUC_UNUSED,
+                GdkEventSequence *seq G_GNUC_UNUSED,
+                gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  self->pinch_start_zoom = paint_canvas_get_zoom (self->canvas);
+}
+
+static void
+on_pinch_scale_changed (GtkGestureZoom *gesture G_GNUC_UNUSED,
+                        double scale,
+                        gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  paint_canvas_set_zoom (self->canvas, self->pinch_start_zoom * scale);
+}
+
 static GtkPopover *
 build_size_popover (PaintCanvasPage *self)
 {
@@ -221,6 +240,11 @@ build_ui (PaintCanvasPage *self)
   g_signal_connect (pan, "drag-begin", G_CALLBACK (on_pan_begin), self);
   g_signal_connect (pan, "drag-update", G_CALLBACK (on_pan_update), self);
   gtk_widget_add_controller (GTK_WIDGET (self->scrolled), GTK_EVENT_CONTROLLER (pan));
+
+  GtkGesture *pinch = gtk_gesture_zoom_new ();
+  g_signal_connect (pinch, "begin", G_CALLBACK (on_pinch_begin), self);
+  g_signal_connect (pinch, "scale-changed", G_CALLBACK (on_pinch_scale_changed), self);
+  gtk_widget_add_controller (GTK_WIDGET (self->scrolled), GTK_EVENT_CONTROLLER (pinch));
 
   /* Floating OSD pill */
   GtkWidget *pill = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
