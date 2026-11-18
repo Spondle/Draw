@@ -249,6 +249,45 @@ test_fill_antialiased_circle_no_halo (void)
   paint_document_free (doc);
 }
 
+static void
+test_large_canvas_tiled_undo_redo (void)
+{
+  PaintDocument *doc = paint_document_new (4096, 4096);
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->color = (GdkRGBA) { 0.0f, 0.5f, 1.0f, 1.0f };
+  settings->size = 12.0;
+  const PaintTool *brush = paint_tools_find ("brush");
+
+  /* Stroke across tile boundaries (x=240..540, y=250) */
+  paint_document_begin_stroke (doc, 240.0, 250.0, brush, settings);
+  for (int x = 250; x <= 540; x += 10)
+    paint_document_continue_stroke (doc, (double) x, 250.0, brush, settings);
+  paint_document_end_stroke (doc, 540.0, 250.0, brush, settings);
+
+  guint8 r, g, b, a;
+  read_pixel_rgba (doc, 260, 250, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+
+  read_pixel_rgba (doc, 520, 250, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 260, 250, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  read_pixel_rgba (doc, 520, 250, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+
+  g_assert_true (paint_document_redo (doc));
+  read_pixel_rgba (doc, 520, 250, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -259,5 +298,6 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/resize_and_png_roundtrip", test_resize_and_png_roundtrip);
   g_test_add_func ("/canvas/fill_tool_and_undo", test_fill_tool_and_undo);
   g_test_add_func ("/canvas/fill_antialiased_circle_no_halo", test_fill_antialiased_circle_no_halo);
+  g_test_add_func ("/canvas/large_canvas_tiled_undo_redo", test_large_canvas_tiled_undo_redo);
   return g_test_run ();
 }

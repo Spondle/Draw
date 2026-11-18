@@ -4,68 +4,187 @@
 #include <string.h>
 
 #define MAX_UNDO_STEPS 40
+#define UNDO_TILE_SIZE 256
+#define GPU_TILE_SIZE 512
 
 static const double ZOOM_STEPS[] = {
   0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.33, 0.5, 0.67, 0.75,
   1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0
 };
 
+/* ============================================================================
+ * Tiled / Full-Surface Undo Snapshots
+ * ============================================================================ */
+
+typedef struct {
+  int x;
+  int y;
+  int w;
+  int h;
+  GBytes *pixels; /* packed row-major w * 4 bytes */
+} UndoTile;
+
+static void
+undo_tile_free (gpointer ptr)
+{
+  UndoTile *t = ptr;
+  if (!t)
+    return;
+  g_clear_pointer (&t->pixels, g_bytes_unref);
+  g_free (t);
+}
+
 typedef struct {
   int width;
   int height;
-  int stride;
-  GBytes *pixels;
-} SurfaceSnapshot;
+  gboolean is_full;
+  int full_stride;
+  GBytes *full_pixels;
+  GPtrArray *tiles;       /* element-type: UndoTile* */
+  GHashTable *saved_keys; /* key: uint32 packed (ty << 16) | tx */
+} UndoStep;
 
 static void
-surface_snapshot_free (gpointer ptr)
+undo_step_free (gpointer ptr)
 {
-  SurfaceSnapshot *snap = ptr;
-  if (!snap)
+  UndoStep *step = ptr;
+  if (!step)
     return;
-  g_clear_pointer (&snap->pixels, g_bytes_unref);
-  g_free (snap);
+  g_clear_pointer (&step->full_pixels, g_bytes_unref);
+  g_clear_pointer (&step->tiles, g_ptr_array_unref);
+  g_clear_pointer (&step->saved_keys, g_hash_table_unref);
+  g_free (step);
 }
 
-static SurfaceSnapshot *
-surface_snapshot_capture (cairo_surface_t *surface)
+static UndoTile *
+capture_rect_tile (cairo_surface_t *surface, int x, int y, int w, int h)
+{
+  cairo_surface_flush (surface);
+  int stride = cairo_image_surface_get_stride (surface);
+  const unsigned char *src = cairo_image_surface_get_data (surface);
+  gsize row_bytes = (gsize) w * 4;
+  unsigned char *buf = g_malloc (row_bytes * (gsize) h);
+
+  for (int row = 0; row < h; row++) {
+    const unsigned char *src_row = src + (gsize) (y + row) * (gsize) stride + (gsize) x * 4;
+    memcpy (buf + (gsize) row * row_bytes, src_row, row_bytes);
+  }
+
+  UndoTile *t = g_new0 (UndoTile, 1);
+  t->x = x;
+  t->y = y;
+  t->w = w;
+  t->h = h;
+  t->pixels = g_bytes_new_take (buf, row_bytes * (gsize) h);
+  return t;
+}
+
+static void
+restore_rect_tile (cairo_surface_t *surface, const UndoTile *t)
+{
+  int stride = cairo_image_surface_get_stride (surface);
+  unsigned char *dst = cairo_image_surface_get_data (surface);
+  gsize len = 0;
+  const unsigned char *src = g_bytes_get_data (t->pixels, &len);
+  gsize row_bytes = (gsize) t->w * 4;
+
+  for (int row = 0; row < t->h; row++) {
+    unsigned char *dst_row = dst + (gsize) (t->y + row) * (gsize) stride + (gsize) t->x * 4;
+    memcpy (dst_row, src + (gsize) row * row_bytes, row_bytes);
+  }
+}
+
+static UndoStep *
+undo_step_new_full (cairo_surface_t *surface)
 {
   cairo_surface_flush (surface);
   int w = cairo_image_surface_get_width (surface);
   int h = cairo_image_surface_get_height (surface);
   int stride = cairo_image_surface_get_stride (surface);
   const unsigned char *data = cairo_image_surface_get_data (surface);
-  gsize byte_len = (gsize) stride * (gsize) h;
 
-  SurfaceSnapshot *snap = g_new0 (SurfaceSnapshot, 1);
-  snap->width = w;
-  snap->height = h;
-  snap->stride = stride;
-  snap->pixels = g_bytes_new (data, byte_len);
-  return snap;
+  UndoStep *step = g_new0 (UndoStep, 1);
+  step->width = w;
+  step->height = h;
+  step->is_full = TRUE;
+  step->full_stride = stride;
+  step->full_pixels = g_bytes_new (data, (gsize) stride * (gsize) h);
+  return step;
+}
+
+static UndoStep *
+undo_step_new_tiled (int width, int height)
+{
+  UndoStep *step = g_new0 (UndoStep, 1);
+  step->width = width;
+  step->height = height;
+  step->is_full = FALSE;
+  step->tiles = g_ptr_array_new_with_free_func (undo_tile_free);
+  step->saved_keys = g_hash_table_new (g_direct_hash, g_direct_equal);
+  return step;
+}
+
+static void
+undo_step_capture_rect (UndoStep *step,
+                        cairo_surface_t *surface,
+                        int rx,
+                        int ry,
+                        int rw,
+                        int rh)
+{
+  int x0 = MAX (0, rx);
+  int y0 = MAX (0, ry);
+  int x1 = MIN (step->width, rx + rw);
+  int y1 = MIN (step->height, ry + rh);
+  if (x0 >= x1 || y0 >= y1)
+    return;
+
+  int tx0 = x0 / UNDO_TILE_SIZE;
+  int ty0 = y0 / UNDO_TILE_SIZE;
+  int tx1 = (x1 - 1) / UNDO_TILE_SIZE;
+  int ty1 = (y1 - 1) / UNDO_TILE_SIZE;
+
+  for (int ty = ty0; ty <= ty1; ty++) {
+    for (int tx = tx0; tx <= tx1; tx++) {
+      guint key = (((guint) ty) << 16) | (guint) tx;
+      if (g_hash_table_contains (step->saved_keys, GUINT_TO_POINTER (key)))
+        continue;
+      g_hash_table_add (step->saved_keys, GUINT_TO_POINTER (key));
+
+      int tile_x = tx * UNDO_TILE_SIZE;
+      int tile_y = ty * UNDO_TILE_SIZE;
+      int tile_w = MIN (UNDO_TILE_SIZE, step->width - tile_x);
+      int tile_h = MIN (UNDO_TILE_SIZE, step->height - tile_y);
+      g_ptr_array_add (step->tiles, capture_rect_tile (surface, tile_x, tile_y, tile_w, tile_h));
+    }
+  }
 }
 
 static cairo_surface_t *
-surface_snapshot_restore (const SurfaceSnapshot *snap)
+restore_full_surface (const UndoStep *step)
 {
   cairo_surface_t *surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32,
-                                                         snap->width,
-                                                         snap->height);
+                                                         step->width,
+                                                         step->height);
   gsize len = 0;
-  const unsigned char *src = g_bytes_get_data (snap->pixels, &len);
+  const unsigned char *src = g_bytes_get_data (step->full_pixels, &len);
   unsigned char *dst = cairo_image_surface_get_data (surface);
   int dst_stride = cairo_image_surface_get_stride (surface);
 
-  if (dst_stride == snap->stride) {
+  if (dst_stride == step->full_stride) {
     memcpy (dst, src, len);
   } else {
-    int copy_bytes = MIN (dst_stride, snap->stride);
-    for (int y = 0; y < snap->height; y++)
-      memcpy (dst + y * dst_stride, src + y * snap->stride, (gsize) copy_bytes);
+    int copy_bytes = MIN (dst_stride, step->full_stride);
+    for (int y = 0; y < step->height; y++)
+      memcpy (dst + y * dst_stride, src + y * step->full_stride, (gsize) copy_bytes);
   }
   cairo_surface_mark_dirty (surface);
   return surface;
 }
+
+/* ============================================================================
+ * PaintDocument
+ * ============================================================================ */
 
 struct _PaintDocument {
   int width;
@@ -74,9 +193,59 @@ struct _PaintDocument {
   cairo_surface_t *surface;
   GFile *file;
   gboolean modified;
-  GPtrArray *undo_stack; /* element-type: SurfaceSnapshot* */
-  GPtrArray *redo_stack; /* element-type: SurfaceSnapshot* */
+  GPtrArray *undo_stack; /* element-type: UndoStep* */
+  GPtrArray *redo_stack; /* element-type: UndoStep* */
+
+  UndoStep *active_stroke_undo;
+  double prev_stroke_x;
+  double prev_stroke_y;
+  double prev2_stroke_x;
+  double prev2_stroke_y;
+
+  gboolean all_dirty;
+  gboolean has_dirty_rect;
+  cairo_rectangle_int_t dirty_rect;
 };
+
+static void
+mark_all_dirty (PaintDocument *doc)
+{
+  doc->all_dirty = TRUE;
+  doc->has_dirty_rect = FALSE;
+}
+
+static void
+mark_rect_dirty (PaintDocument *doc, int x, int y, int w, int h)
+{
+  if (doc->all_dirty)
+    return;
+  int x0 = MAX (0, x);
+  int y0 = MAX (0, y);
+  int x1 = MIN (doc->width, x + w);
+  int y1 = MIN (doc->height, y + h);
+  if (x0 >= x1 || y0 >= y1)
+    return;
+
+  if (!doc->has_dirty_rect) {
+    doc->dirty_rect = (cairo_rectangle_int_t) { x0, y0, x1 - x0, y1 - y0 };
+    doc->has_dirty_rect = TRUE;
+  } else {
+    int ux0 = MIN (doc->dirty_rect.x, x0);
+    int uy0 = MIN (doc->dirty_rect.y, y0);
+    int ux1 = MAX (doc->dirty_rect.x + doc->dirty_rect.width, x1);
+    int uy1 = MAX (doc->dirty_rect.y + doc->dirty_rect.height, y1);
+    doc->dirty_rect = (cairo_rectangle_int_t) { ux0, uy0, ux1 - ux0, uy1 - uy0 };
+  }
+}
+
+static void
+push_undo_step (PaintDocument *doc, UndoStep *step)
+{
+  g_ptr_array_add (doc->undo_stack, step);
+  if (doc->undo_stack->len > MAX_UNDO_STEPS)
+    g_ptr_array_remove_index (doc->undo_stack, 0);
+  g_ptr_array_set_size (doc->redo_stack, 0);
+}
 
 static cairo_surface_t *
 create_blank_surface (int width, int height, const GdkRGBA *bg)
@@ -98,8 +267,9 @@ paint_document_new (int width, int height)
   doc->height = MAX (1, height);
   doc->background_color = (GdkRGBA) { 1.0f, 1.0f, 1.0f, 1.0f };
   doc->surface = create_blank_surface (doc->width, doc->height, &doc->background_color);
-  doc->undo_stack = g_ptr_array_new_with_free_func (surface_snapshot_free);
-  doc->redo_stack = g_ptr_array_new_with_free_func (surface_snapshot_free);
+  doc->undo_stack = g_ptr_array_new_with_free_func (undo_step_free);
+  doc->redo_stack = g_ptr_array_new_with_free_func (undo_step_free);
+  doc->all_dirty = TRUE;
   return doc;
 }
 
@@ -173,6 +343,7 @@ paint_document_new_from_file (GFile *file, GError **error)
 
   doc->file = g_object_ref (file);
   doc->modified = FALSE;
+  mark_all_dirty (doc);
   return doc;
 }
 
@@ -195,6 +366,7 @@ paint_document_free (PaintDocument *doc)
 {
   if (!doc)
     return;
+  g_clear_pointer (&doc->active_stroke_undo, undo_step_free);
   g_clear_pointer (&doc->surface, cairo_surface_destroy);
   g_clear_object (&doc->file);
   g_clear_pointer (&doc->undo_stack, g_ptr_array_unref);
@@ -238,19 +410,10 @@ paint_document_set_modified (PaintDocument *doc, gboolean modified)
   doc->modified = modified;
 }
 
-static void
-push_undo_state (PaintDocument *doc)
-{
-  g_ptr_array_add (doc->undo_stack, surface_snapshot_capture (doc->surface));
-  if (doc->undo_stack->len > MAX_UNDO_STEPS)
-    g_ptr_array_remove_index (doc->undo_stack, 0);
-  g_ptr_array_set_size (doc->redo_stack, 0);
-}
-
 gboolean
 paint_document_can_undo (const PaintDocument *doc)
 {
-  return doc->undo_stack->len > 0;
+  return doc->undo_stack->len > 0 || doc->active_stroke_undo != NULL;
 }
 
 gboolean
@@ -259,19 +422,43 @@ paint_document_can_redo (const PaintDocument *doc)
   return doc->redo_stack->len > 0;
 }
 
+static UndoStep *
+apply_undo_step (PaintDocument *doc, const UndoStep *step)
+{
+  if (step->is_full) {
+    UndoStep *reverse = undo_step_new_full (doc->surface);
+    cairo_surface_destroy (doc->surface);
+    doc->surface = restore_full_surface (step);
+    doc->width = cairo_image_surface_get_width (doc->surface);
+    doc->height = cairo_image_surface_get_height (doc->surface);
+    mark_all_dirty (doc);
+    return reverse;
+  }
+
+  UndoStep *reverse = undo_step_new_tiled (doc->width, doc->height);
+  for (guint i = 0; i < step->tiles->len; i++) {
+    const UndoTile *t = g_ptr_array_index (step->tiles, i);
+    g_ptr_array_add (reverse->tiles, capture_rect_tile (doc->surface, t->x, t->y, t->w, t->h));
+    restore_rect_tile (doc->surface, t);
+    mark_rect_dirty (doc, t->x, t->y, t->w, t->h);
+  }
+  cairo_surface_mark_dirty (doc->surface);
+  return reverse;
+}
+
 gboolean
 paint_document_undo (PaintDocument *doc)
 {
+  if (doc->active_stroke_undo) {
+    push_undo_step (doc, doc->active_stroke_undo);
+    doc->active_stroke_undo = NULL;
+  }
   if (doc->undo_stack->len == 0)
     return FALSE;
 
-  g_ptr_array_add (doc->redo_stack, surface_snapshot_capture (doc->surface));
   guint last = doc->undo_stack->len - 1;
-  const SurfaceSnapshot *snap = g_ptr_array_index (doc->undo_stack, last);
-  cairo_surface_destroy (doc->surface);
-  doc->surface = surface_snapshot_restore (snap);
-  doc->width = cairo_image_surface_get_width (doc->surface);
-  doc->height = cairo_image_surface_get_height (doc->surface);
+  const UndoStep *step = g_ptr_array_index (doc->undo_stack, last);
+  g_ptr_array_add (doc->redo_stack, apply_undo_step (doc, step));
   g_ptr_array_remove_index (doc->undo_stack, last);
   doc->modified = TRUE;
   return TRUE;
@@ -283,13 +470,9 @@ paint_document_redo (PaintDocument *doc)
   if (doc->redo_stack->len == 0)
     return FALSE;
 
-  g_ptr_array_add (doc->undo_stack, surface_snapshot_capture (doc->surface));
   guint last = doc->redo_stack->len - 1;
-  const SurfaceSnapshot *snap = g_ptr_array_index (doc->redo_stack, last);
-  cairo_surface_destroy (doc->surface);
-  doc->surface = surface_snapshot_restore (snap);
-  doc->width = cairo_image_surface_get_width (doc->surface);
-  doc->height = cairo_image_surface_get_height (doc->surface);
+  const UndoStep *step = g_ptr_array_index (doc->redo_stack, last);
+  g_ptr_array_add (doc->undo_stack, apply_undo_step (doc, step));
   g_ptr_array_remove_index (doc->redo_stack, last);
   doc->modified = TRUE;
   return TRUE;
@@ -302,10 +485,36 @@ paint_document_begin_stroke (PaintDocument *doc,
                              const PaintTool *tool,
                              PaintToolSettings *settings)
 {
-  push_undo_state (doc);
-  cairo_t *cr = cairo_create (doc->surface);
-  tool->begin_stroke (tool, cr, x, y, settings);
-  cairo_destroy (cr);
+  if (doc->active_stroke_undo) {
+    push_undo_step (doc, doc->active_stroke_undo);
+    doc->active_stroke_undo = NULL;
+  }
+
+  if (tool->uses_brush_size) {
+    int pad = (int) ceil (settings->size / 2.0) + 4;
+    int rx = (int) floor (x) - pad;
+    int ry = (int) floor (y) - pad;
+    int rsize = pad * 2 + 2;
+
+    doc->active_stroke_undo = undo_step_new_tiled (doc->width, doc->height);
+    doc->prev_stroke_x = x;
+    doc->prev_stroke_y = y;
+    doc->prev2_stroke_x = x;
+    doc->prev2_stroke_y = y;
+    undo_step_capture_rect (doc->active_stroke_undo, doc->surface, rx, ry, rsize, rsize);
+
+    cairo_t *cr = cairo_create (doc->surface);
+    tool->begin_stroke (tool, cr, x, y, settings);
+    cairo_destroy (cr);
+    mark_rect_dirty (doc, rx, ry, rsize, rsize);
+  } else {
+    push_undo_step (doc, undo_step_new_full (doc->surface));
+    cairo_t *cr = cairo_create (doc->surface);
+    tool->begin_stroke (tool, cr, x, y, settings);
+    cairo_destroy (cr);
+    mark_all_dirty (doc);
+  }
+
   doc->modified = TRUE;
 }
 
@@ -316,9 +525,38 @@ paint_document_continue_stroke (PaintDocument *doc,
                                 const PaintTool *tool,
                                 PaintToolSettings *settings)
 {
-  cairo_t *cr = cairo_create (doc->surface);
-  tool->continue_stroke (tool, cr, x, y, settings);
-  cairo_destroy (cr);
+  if (tool->uses_brush_size) {
+    if (!doc->active_stroke_undo)
+      doc->active_stroke_undo = undo_step_new_tiled (doc->width, doc->height);
+
+    int pad = (int) ceil (settings->size / 2.0) + 4;
+    double min_x = MIN (MIN (doc->prev2_stroke_x, doc->prev_stroke_x), x);
+    double max_x = MAX (MAX (doc->prev2_stroke_x, doc->prev_stroke_x), x);
+    double min_y = MIN (MIN (doc->prev2_stroke_y, doc->prev_stroke_y), y);
+    double max_y = MAX (MAX (doc->prev2_stroke_y, doc->prev_stroke_y), y);
+
+    int rx = (int) floor (min_x) - pad;
+    int ry = (int) floor (min_y) - pad;
+    int rw = (int) ceil (max_x - min_x) + pad * 2 + 2;
+    int rh = (int) ceil (max_y - min_y) + pad * 2 + 2;
+
+    undo_step_capture_rect (doc->active_stroke_undo, doc->surface, rx, ry, rw, rh);
+
+    cairo_t *cr = cairo_create (doc->surface);
+    tool->continue_stroke (tool, cr, x, y, settings);
+    cairo_destroy (cr);
+    mark_rect_dirty (doc, rx, ry, rw, rh);
+
+    doc->prev2_stroke_x = doc->prev_stroke_x;
+    doc->prev2_stroke_y = doc->prev_stroke_y;
+    doc->prev_stroke_x = x;
+    doc->prev_stroke_y = y;
+  } else {
+    cairo_t *cr = cairo_create (doc->surface);
+    tool->continue_stroke (tool, cr, x, y, settings);
+    cairo_destroy (cr);
+  }
+
   doc->modified = TRUE;
 }
 
@@ -329,16 +567,47 @@ paint_document_end_stroke (PaintDocument *doc,
                            const PaintTool *tool,
                            PaintToolSettings *settings)
 {
-  cairo_t *cr = cairo_create (doc->surface);
-  tool->end_stroke (tool, cr, x, y, settings);
-  cairo_destroy (cr);
+  if (tool->uses_brush_size) {
+    int pad = (int) ceil (settings->size / 2.0) + 4;
+    double min_x = MIN (doc->prev_stroke_x, x);
+    double max_x = MAX (doc->prev_stroke_x, x);
+    double min_y = MIN (doc->prev_stroke_y, y);
+    double max_y = MAX (doc->prev_stroke_y, y);
+
+    int rx = (int) floor (min_x) - pad;
+    int ry = (int) floor (min_y) - pad;
+    int rw = (int) ceil (max_x - min_x) + pad * 2 + 2;
+    int rh = (int) ceil (max_y - min_y) + pad * 2 + 2;
+
+    if (doc->active_stroke_undo)
+      undo_step_capture_rect (doc->active_stroke_undo, doc->surface, rx, ry, rw, rh);
+
+    cairo_t *cr = cairo_create (doc->surface);
+    tool->end_stroke (tool, cr, x, y, settings);
+    cairo_destroy (cr);
+    mark_rect_dirty (doc, rx, ry, rw, rh);
+
+    if (doc->active_stroke_undo) {
+      push_undo_step (doc, doc->active_stroke_undo);
+      doc->active_stroke_undo = NULL;
+    }
+  } else {
+    cairo_t *cr = cairo_create (doc->surface);
+    tool->end_stroke (tool, cr, x, y, settings);
+    cairo_destroy (cr);
+  }
+
   doc->modified = TRUE;
 }
 
 void
 paint_document_clear (PaintDocument *doc)
 {
-  push_undo_state (doc);
+  if (doc->active_stroke_undo) {
+    push_undo_step (doc, doc->active_stroke_undo);
+    doc->active_stroke_undo = NULL;
+  }
+  push_undo_step (doc, undo_step_new_full (doc->surface));
   cairo_t *cr = cairo_create (doc->surface);
   cairo_set_source_rgba (cr,
                          doc->background_color.red,
@@ -349,6 +618,7 @@ paint_document_clear (PaintDocument *doc)
   cairo_paint (cr);
   cairo_destroy (cr);
   doc->modified = TRUE;
+  mark_all_dirty (doc);
 }
 
 void
@@ -359,7 +629,12 @@ paint_document_resize (PaintDocument *doc, int new_width, int new_height)
   if (w == doc->width && h == doc->height)
     return;
 
-  push_undo_state (doc);
+  if (doc->active_stroke_undo) {
+    push_undo_step (doc, doc->active_stroke_undo);
+    doc->active_stroke_undo = NULL;
+  }
+  push_undo_step (doc, undo_step_new_full (doc->surface));
+
   cairo_surface_t *new_surface = create_blank_surface (w, h, &doc->background_color);
   cairo_t *cr = cairo_create (new_surface);
   cairo_set_source_surface (cr, doc->surface, 0, 0);
@@ -371,6 +646,7 @@ paint_document_resize (PaintDocument *doc, int new_width, int new_height)
   doc->width = w;
   doc->height = h;
   doc->modified = TRUE;
+  mark_all_dirty (doc);
 }
 
 gboolean
@@ -437,7 +713,7 @@ paint_document_save_to_file (PaintDocument *doc, GFile *file, GError **error)
 }
 
 /* ============================================================================
- * PaintCanvas (GPU-accelerated GtkWidget)
+ * PaintCanvas (GPU-tiled GtkWidget)
  * ============================================================================ */
 
 enum {
@@ -453,7 +729,12 @@ struct _PaintCanvas {
 
   PaintDocument *document;
   PaintToolSettings *settings; /* unowned shared settings */
-  GdkTexture *cached_texture;
+  GPtrArray *gpu_tiles;        /* element-type: GdkTexture* (nullable) */
+  int tile_cols;
+  int tile_rows;
+  int cached_doc_w;
+  int cached_doc_h;
+
   double zoom;
   gboolean has_hover;
   double hover_x;
@@ -467,27 +748,142 @@ struct _PaintCanvas {
 G_DEFINE_FINAL_TYPE (PaintCanvas, paint_canvas, GTK_TYPE_WIDGET)
 
 static void
-invalidate_texture (PaintCanvas *self)
+nullable_object_unref (gpointer ptr)
 {
-  g_clear_object (&self->cached_texture);
+  if (ptr)
+    g_object_unref (ptr);
+}
+
+static void
+rebuild_gpu_tile_grid (PaintCanvas *self)
+{
+  if (!self->gpu_tiles)
+    self->gpu_tiles = g_ptr_array_new_with_free_func (nullable_object_unref);
+  g_ptr_array_set_size (self->gpu_tiles, 0);
+
+  if (!self->document) {
+    self->tile_cols = 0;
+    self->tile_rows = 0;
+    self->cached_doc_w = 0;
+    self->cached_doc_h = 0;
+    return;
+  }
+
+  self->cached_doc_w = self->document->width;
+  self->cached_doc_h = self->document->height;
+  self->tile_cols = (self->cached_doc_w + GPU_TILE_SIZE - 1) / GPU_TILE_SIZE;
+  self->tile_rows = (self->cached_doc_h + GPU_TILE_SIZE - 1) / GPU_TILE_SIZE;
+  g_ptr_array_set_size (self->gpu_tiles, (guint) (self->tile_cols * self->tile_rows));
+}
+
+static void
+invalidate_all_gpu_tiles (PaintCanvas *self)
+{
+  if (!self->gpu_tiles)
+    return;
+  for (guint i = 0; i < self->gpu_tiles->len; i++) {
+    gpointer obj = g_ptr_array_index (self->gpu_tiles, i);
+    if (obj) {
+      g_object_unref (obj);
+      self->gpu_tiles->pdata[i] = NULL;
+    }
+  }
+}
+
+static void
+sync_dirty_gpu_tiles (PaintCanvas *self)
+{
+  PaintDocument *doc = self->document;
+  if (!doc)
+    return;
+
+  if (!self->gpu_tiles ||
+      self->cached_doc_w != doc->width ||
+      self->cached_doc_h != doc->height) {
+    rebuild_gpu_tile_grid (self);
+    doc->all_dirty = FALSE;
+    doc->has_dirty_rect = FALSE;
+    return;
+  }
+
+  if (doc->all_dirty) {
+    invalidate_all_gpu_tiles (self);
+    doc->all_dirty = FALSE;
+    doc->has_dirty_rect = FALSE;
+    return;
+  }
+
+  if (!doc->has_dirty_rect)
+    return;
+
+  int dx0 = doc->dirty_rect.x;
+  int dy0 = doc->dirty_rect.y;
+  int dx1 = dx0 + doc->dirty_rect.width;
+  int dy1 = dy0 + doc->dirty_rect.height;
+  doc->has_dirty_rect = FALSE;
+
+  /* Expand by 1px to catch neighboring tiles' overlap padding */
+  int px0 = MAX (0, dx0 - 1);
+  int py0 = MAX (0, dy0 - 1);
+  int px1 = MIN (doc->width, dx1 + 1);
+  int py1 = MIN (doc->height, dy1 + 1);
+  if (px0 >= px1 || py0 >= py1)
+    return;
+
+  int tx0 = px0 / GPU_TILE_SIZE;
+  int ty0 = py0 / GPU_TILE_SIZE;
+  int tx1 = (px1 - 1) / GPU_TILE_SIZE;
+  int ty1 = (py1 - 1) / GPU_TILE_SIZE;
+
+  for (int ty = ty0; ty <= ty1; ty++) {
+    for (int tx = tx0; tx <= tx1; tx++) {
+      guint idx = (guint) (ty * self->tile_cols + tx);
+      if (idx < self->gpu_tiles->len && self->gpu_tiles->pdata[idx]) {
+        g_object_unref (self->gpu_tiles->pdata[idx]);
+        self->gpu_tiles->pdata[idx] = NULL;
+      }
+    }
+  }
 }
 
 static GdkTexture *
-ensure_texture (PaintCanvas *self)
+ensure_gpu_tile (PaintCanvas *self, int tx, int ty)
 {
-  if (self->cached_texture || !self->document)
-    return self->cached_texture;
+  guint idx = (guint) (ty * self->tile_cols + tx);
+  if (self->gpu_tiles->pdata[idx])
+    return GDK_TEXTURE (self->gpu_tiles->pdata[idx]);
 
   cairo_surface_t *surface = self->document->surface;
   cairo_surface_flush (surface);
-  int w = cairo_image_surface_get_width (surface);
-  int h = cairo_image_surface_get_height (surface);
+  int doc_w = self->document->width;
+  int doc_h = self->document->height;
   int stride = cairo_image_surface_get_stride (surface);
-  const unsigned char *data = cairo_image_surface_get_data (surface);
+  const unsigned char *src = cairo_image_surface_get_data (surface);
 
-  g_autoptr (GBytes) bytes = g_bytes_new (data, (gsize) stride * (gsize) h);
-  self->cached_texture = gdk_memory_texture_new (w, h, GDK_MEMORY_DEFAULT, bytes, (gsize) stride);
-  return self->cached_texture;
+  int x0 = tx * GPU_TILE_SIZE;
+  int y0 = ty * GPU_TILE_SIZE;
+  int tw = MIN (GPU_TILE_SIZE, doc_w - x0);
+  int th = MIN (GPU_TILE_SIZE, doc_h - y0);
+
+  /* 1px padded upload region eliminates bilinear seams between tiles */
+  int bx0 = MAX (0, x0 - 1);
+  int by0 = MAX (0, y0 - 1);
+  int bx1 = MIN (doc_w, x0 + tw + 1);
+  int by1 = MIN (doc_h, y0 + th + 1);
+  int bw = bx1 - bx0;
+  int bh = by1 - by0;
+
+  gsize row_bytes = (gsize) bw * 4;
+  unsigned char *buf = g_malloc (row_bytes * (gsize) bh);
+  for (int row = 0; row < bh; row++) {
+    const unsigned char *src_row = src + (gsize) (by0 + row) * (gsize) stride + (gsize) bx0 * 4;
+    memcpy (buf + (gsize) row * row_bytes, src_row, row_bytes);
+  }
+
+  g_autoptr (GBytes) bytes = g_bytes_new_take (buf, row_bytes * (gsize) bh);
+  GdkTexture *tex = gdk_memory_texture_new (bw, bh, GDK_MEMORY_DEFAULT, bytes, row_bytes);
+  self->gpu_tiles->pdata[idx] = tex;
+  return tex;
 }
 
 static void
@@ -536,14 +932,23 @@ static void
 paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 {
   PaintCanvas *self = PAINT_CANVAS (widget);
-  GdkTexture *texture = ensure_texture (self);
-  if (!texture)
+  if (!self->document)
     return;
+
+  sync_dirty_gpu_tiles (self);
 
   float draw_w = (float) gtk_widget_get_width (widget);
   float draw_h = (float) gtk_widget_get_height (widget);
   if (draw_w <= 0.0f || draw_h <= 0.0f)
     return;
+
+  graphene_rect_t vis_rect = GRAPHENE_RECT_INIT (0.0f, 0.0f, draw_w, draw_h);
+  GtkWidget *scrolled = gtk_widget_get_ancestor (widget, GTK_TYPE_SCROLLED_WINDOW);
+  if (scrolled) {
+    graphene_rect_t computed;
+    if (gtk_widget_compute_bounds (scrolled, widget, &computed))
+      graphene_rect_intersection (&vis_rect, &computed, &vis_rect);
+  }
 
   GskScalingFilter filter = GSK_SCALING_FILTER_LINEAR;
   if (self->zoom >= 2.0)
@@ -551,10 +956,50 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
   else if (self->zoom < 1.0)
     filter = GSK_SCALING_FILTER_TRILINEAR;
 
-  gtk_snapshot_append_scaled_texture (snapshot,
-                                      texture,
-                                      filter,
-                                      &GRAPHENE_RECT_INIT (0.0f, 0.0f, draw_w, draw_h));
+  int doc_w = self->document->width;
+  int doc_h = self->document->height;
+  int vx0 = MAX (0, (int) floor (vis_rect.origin.x / self->zoom) / GPU_TILE_SIZE);
+  int vy0 = MAX (0, (int) floor (vis_rect.origin.y / self->zoom) / GPU_TILE_SIZE);
+  int vx1 = MIN (self->tile_cols - 1,
+                 (int) floor ((vis_rect.origin.x + vis_rect.size.width) / self->zoom) / GPU_TILE_SIZE);
+  int vy1 = MIN (self->tile_rows - 1,
+                 (int) floor ((vis_rect.origin.y + vis_rect.size.height) / self->zoom) / GPU_TILE_SIZE);
+
+  for (int ty = vy0; ty <= vy1; ty++) {
+    int y0 = ty * GPU_TILE_SIZE;
+    int th = MIN (GPU_TILE_SIZE, doc_h - y0);
+    int by0 = MAX (0, y0 - 1);
+    int bh = MIN (doc_h, y0 + th + 1) - by0;
+
+    float clip_y0 = (float) (y0 * self->zoom);
+    float clip_y1 = (float) ((y0 + th) * self->zoom);
+    float tex_y0 = (float) (by0 * self->zoom);
+    float tex_y1 = (float) ((by0 + bh) * self->zoom);
+
+    for (int tx = vx0; tx <= vx1; tx++) {
+      int x0 = tx * GPU_TILE_SIZE;
+      int tw = MIN (GPU_TILE_SIZE, doc_w - x0);
+      int bx0 = MAX (0, x0 - 1);
+      int bw = MIN (doc_w, x0 + tw + 1) - bx0;
+
+      float clip_x0 = (float) (x0 * self->zoom);
+      float clip_x1 = (float) ((x0 + tw) * self->zoom);
+      float tex_x0 = (float) (bx0 * self->zoom);
+      float tex_x1 = (float) ((bx0 + bw) * self->zoom);
+
+      GdkTexture *tex = ensure_gpu_tile (self, tx, ty);
+      graphene_rect_t clip_rect = GRAPHENE_RECT_INIT (clip_x0, clip_y0,
+                                                      clip_x1 - clip_x0,
+                                                      clip_y1 - clip_y0);
+      graphene_rect_t tex_rect = GRAPHENE_RECT_INIT (tex_x0, tex_y0,
+                                                     tex_x1 - tex_x0,
+                                                     tex_y1 - tex_y0);
+
+      gtk_snapshot_push_clip (snapshot, &clip_rect);
+      gtk_snapshot_append_scaled_texture (snapshot, tex, filter, &tex_rect);
+      gtk_snapshot_pop (snapshot);
+    }
+  }
 
   if (self->show_cursor_ring && self->has_hover && self->settings) {
     const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
@@ -604,7 +1049,6 @@ on_drag_begin (GtkGestureDrag *gesture,
 
   const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
   paint_document_begin_stroke (self->document, cx, cy, tool, self->settings);
-  invalidate_texture (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
 }
@@ -627,7 +1071,6 @@ on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
 
   const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
   paint_document_continue_stroke (self->document, cx, cy, tool, self->settings);
-  invalidate_texture (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
@@ -647,7 +1090,6 @@ on_drag_end (GtkGestureDrag *gesture G_GNUC_UNUSED,
 
   const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
   paint_document_end_stroke (self->document, cx, cy, tool, self->settings);
-  invalidate_texture (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
 }
@@ -658,9 +1100,13 @@ on_drag_cancel (GtkGesture *gesture G_GNUC_UNUSED,
                 gpointer user_data)
 {
   PaintCanvas *self = PAINT_CANVAS (user_data);
-  self->drawing_active = FALSE;
-  if (self->settings && self->settings->history_points)
-    g_array_set_size (self->settings->history_points, 0);
+  if (self->drawing_active) {
+    self->drawing_active = FALSE;
+    const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
+    paint_document_end_stroke (self->document, self->hover_x, self->hover_y, tool, self->settings);
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+    g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+  }
 }
 
 static void
@@ -688,7 +1134,7 @@ static void
 paint_canvas_finalize (GObject *object)
 {
   PaintCanvas *self = PAINT_CANVAS (object);
-  invalidate_texture (self);
+  g_clear_pointer (&self->gpu_tiles, g_ptr_array_unref);
   g_clear_pointer (&self->document, paint_document_free);
   G_OBJECT_CLASS (paint_canvas_parent_class)->finalize (object);
 }
@@ -720,6 +1166,7 @@ paint_canvas_init (PaintCanvas *self)
 {
   self->zoom = 1.0;
   self->show_cursor_ring = TRUE;
+  self->gpu_tiles = g_ptr_array_new_with_free_func (nullable_object_unref);
 
   gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-frame");
   gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-shadow");
@@ -749,6 +1196,7 @@ paint_canvas_new (PaintDocument *doc, PaintToolSettings *settings)
   self->document = doc ? doc : paint_document_new (PAINT_DEFAULT_CANVAS_WIDTH,
                                                    PAINT_DEFAULT_CANVAS_HEIGHT);
   self->settings = settings;
+  rebuild_gpu_tile_grid (self);
   update_size_request (self);
   return self;
 }
@@ -762,9 +1210,9 @@ paint_canvas_get_document (PaintCanvas *self)
 void
 paint_canvas_set_document (PaintCanvas *self, PaintDocument *doc)
 {
-  invalidate_texture (self);
   g_clear_pointer (&self->document, paint_document_free);
   self->document = doc;
+  rebuild_gpu_tile_grid (self);
   update_size_request (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
@@ -840,7 +1288,6 @@ gboolean
 paint_canvas_undo (PaintCanvas *self)
 {
   if (paint_document_undo (self->document)) {
-    invalidate_texture (self);
     update_size_request (self);
     gtk_widget_queue_draw (GTK_WIDGET (self));
     g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
@@ -853,7 +1300,6 @@ gboolean
 paint_canvas_redo (PaintCanvas *self)
 {
   if (paint_document_redo (self->document)) {
-    invalidate_texture (self);
     update_size_request (self);
     gtk_widget_queue_draw (GTK_WIDGET (self));
     g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
@@ -866,7 +1312,6 @@ void
 paint_canvas_clear (PaintCanvas *self)
 {
   paint_document_clear (self->document);
-  invalidate_texture (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
 }
@@ -875,7 +1320,6 @@ void
 paint_canvas_resize (PaintCanvas *self, int width, int height)
 {
   paint_document_resize (self->document, width, height);
-  invalidate_texture (self);
   update_size_request (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
