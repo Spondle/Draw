@@ -83,6 +83,7 @@ act_shortcuts (GSimpleAction *action G_GNUC_UNUSED,
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Undo", "<Control>z"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Redo", "<Control><Shift>z"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Brush Tool", "b"));
+  adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Line Tool", "l"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Eraser Tool", "e"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Fill Tool", "f"));
   adw_shortcuts_section_add (draw_sec, adw_shortcuts_item_new ("Decrease / Increase Brush Size", "bracketleft bracketright"));

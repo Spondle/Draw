@@ -319,6 +319,114 @@ test_cancel_stroke_restores_without_undo (void)
   paint_document_free (doc);
 }
 
+static void
+test_line_tool_and_undo_redo (void)
+{
+  PaintDocument *doc = paint_document_new (100, 100);
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->color = (GdkRGBA) { 1.0f, 0.0f, 0.0f, 1.0f };
+  settings->size = 6.0;
+  const PaintTool *line = paint_tools_find ("line");
+  g_assert_cmpstr (line->id, ==, "line");
+  g_assert_nonnull (line->draw_preview);
+  g_assert_nonnull (line->snap_point);
+
+  paint_document_begin_stroke (doc, 10.0, 20.0, line, settings);
+  /* Intermediate drag positions must not bake onto the document */
+  paint_document_continue_stroke (doc, 40.0, 60.0, line, settings);
+  paint_document_end_stroke (doc, 70.0, 20.0, line, settings);
+
+  g_assert_true (paint_document_get_modified (doc));
+  g_assert_true (paint_document_can_undo (doc));
+
+  guint8 r, g, b, a;
+  read_pixel_rgba (doc, 10, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 0);
+  read_pixel_rgba (doc, 40, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 0);
+  read_pixel_rgba (doc, 70, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 0);
+
+  /* Intermediate drag point stays white */
+  read_pixel_rgba (doc, 40, 60, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 40, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+
+  g_assert_true (paint_document_redo (doc));
+  read_pixel_rgba (doc, 40, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 0);
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
+static void
+test_line_tool_tiled_undo_cancel_and_snap (void)
+{
+  PaintDocument *doc = paint_document_new (600, 600);
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->color = (GdkRGBA) { 0.0f, 0.0f, 1.0f, 1.0f };
+  settings->size = 8.0;
+  const PaintTool *line = paint_tools_find ("line");
+
+  /* Cancel mid-drag leaves document clean */
+  paint_document_begin_stroke (doc, 100.0, 100.0, line, settings);
+  paint_document_continue_stroke (doc, 500.0, 500.0, line, settings);
+  paint_document_cancel_stroke (doc);
+  g_assert_false (paint_document_get_modified (doc));
+  g_assert_false (paint_document_can_undo (doc));
+
+  /* Draw across 256px tile boundaries */
+  paint_document_begin_stroke (doc, 100.0, 100.0, line, settings);
+  paint_document_continue_stroke (doc, 100.0, 400.0, line, settings);
+  paint_document_end_stroke (doc, 500.0, 500.0, line, settings);
+
+  guint8 r, g, b, a;
+  read_pixel_rgba (doc, 100, 100, &r, &g, &b, &a);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_cmpuint (r, ==, 0);
+  read_pixel_rgba (doc, 300, 300, &r, &g, &b, &a);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_cmpuint (r, ==, 0);
+  read_pixel_rgba (doc, 500, 500, &r, &g, &b, &a);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_cmpuint (r, ==, 0);
+
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 100, 100, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  read_pixel_rgba (doc, 300, 300, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  read_pixel_rgba (doc, 500, 500, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+
+  /* Verify 45-degree Shift snapping */
+  double sx = 200.0, sy = 112.0;
+  line->snap_point (100.0, 100.0, &sx, &sy);
+  g_assert_cmpfloat_with_epsilon (sx, 200.0, 1e-6);
+  g_assert_cmpfloat_with_epsilon (sy, 100.0, 1e-6);
+
+  sx = 195.0;
+  sy = 205.0;
+  line->snap_point (100.0, 100.0, &sx, &sy);
+  g_assert_cmpfloat_with_epsilon (sx, 200.0, 1e-6);
+  g_assert_cmpfloat_with_epsilon (sy, 200.0, 1e-6);
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -331,5 +439,7 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/fill_antialiased_circle_no_halo", test_fill_antialiased_circle_no_halo);
   g_test_add_func ("/canvas/large_canvas_tiled_undo_redo", test_large_canvas_tiled_undo_redo);
   g_test_add_func ("/canvas/cancel_stroke_restores_without_undo", test_cancel_stroke_restores_without_undo);
+  g_test_add_func ("/canvas/line_tool_and_undo_redo", test_line_tool_and_undo_redo);
+  g_test_add_func ("/canvas/line_tool_tiled_undo_cancel_and_snap", test_line_tool_tiled_undo_cancel_and_snap);
   return g_test_run ();
 }

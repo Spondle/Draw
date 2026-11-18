@@ -425,6 +425,98 @@ fill_noop (const PaintTool *tool G_GNUC_UNUSED,
 {
 }
 
+static void
+draw_straight_line (cairo_t *cr,
+                    double x0,
+                    double y0,
+                    double x1,
+                    double y1,
+                    const PaintToolSettings *settings)
+{
+  configure_brush_context (cr, settings);
+  if (hypot (x1 - x0, y1 - y0) < 1e-6) {
+    cairo_arc (cr, x0, y0, MAX (0.5, settings->size / 2.0), 0.0, 2.0 * G_PI);
+    cairo_fill (cr);
+    return;
+  }
+
+  cairo_set_line_width (cr, MAX (1.0, settings->size));
+  cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+  cairo_move_to (cr, x0, y0);
+  cairo_line_to (cr, x1, y1);
+  cairo_stroke (cr);
+}
+
+static void
+line_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
+                   cairo_t *cr G_GNUC_UNUSED,
+                   double x,
+                   double y,
+                   PaintToolSettings *settings)
+{
+  PaintPoint pt = { x, y };
+  g_array_set_size (settings->history_points, 0);
+  g_array_append_val (settings->history_points, pt);
+}
+
+static void
+line_end_stroke (const PaintTool *tool G_GNUC_UNUSED,
+                 cairo_t *cr,
+                 double x,
+                 double y,
+                 PaintToolSettings *settings)
+{
+  GArray *pts = settings->history_points;
+  double x0 = x;
+  double y0 = y;
+  if (pts->len > 0) {
+    PaintPoint start = g_array_index (pts, PaintPoint, 0);
+    x0 = start.x;
+    y0 = start.y;
+  }
+  draw_straight_line (cr, x0, y0, x, y, settings);
+  g_array_set_size (pts, 0);
+}
+
+static void
+line_draw_preview (const PaintTool *tool G_GNUC_UNUSED,
+                   cairo_t *cr,
+                   double x0,
+                   double y0,
+                   double x1,
+                   double y1,
+                   const PaintToolSettings *settings)
+{
+  draw_straight_line (cr, x0, y0, x1, y1, settings);
+}
+
+static void
+line_snap_point (double x0, double y0, double *x1, double *y1)
+{
+  double dx = *x1 - x0;
+  double dy = *y1 - y0;
+  if (hypot (dx, dy) < 1e-6)
+    return;
+
+  static const double dirs[8][2] = {
+    {  1.0,            0.0           },
+    {  1.0 / G_SQRT2,  1.0 / G_SQRT2 },
+    {  0.0,            1.0           },
+    { -1.0 / G_SQRT2,  1.0 / G_SQRT2 },
+    { -1.0,            0.0           },
+    { -1.0 / G_SQRT2, -1.0 / G_SQRT2 },
+    {  0.0,           -1.0           },
+    {  1.0 / G_SQRT2, -1.0 / G_SQRT2 },
+  };
+  double angle = atan2 (dy, dx);
+  int octant = ((int) lround (angle / (G_PI / 4.0)) % 8 + 8) % 8;
+  double ux = dirs[octant][0];
+  double uy = dirs[octant][1];
+  double proj = dx * ux + dy * uy;
+  *x1 = x0 + proj * ux;
+  *y1 = y0 + proj * uy;
+}
+
 static const PaintTool BUILTIN_TOOLS[] = {
   {
     .id = "brush",
@@ -435,6 +527,18 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .begin_stroke = freehand_begin_stroke,
     .continue_stroke = freehand_continue_stroke,
     .end_stroke = freehand_end_stroke,
+  },
+  {
+    .id = "line",
+    .name = "Line",
+    .icon_name = "tool-line-symbolic",
+    .tooltip = "Line (L) · Hold Shift to snap angle",
+    .uses_brush_size = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = line_draw_preview,
+    .snap_point = line_snap_point,
   },
   {
     .id = "eraser",

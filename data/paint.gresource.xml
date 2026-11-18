@@ -6,5 +6,6 @@
     <file>icons/symbolic/apps/io.github.spondle.Paint-symbolic.svg</file>
     <file>icons/scalable/actions/tool-eraser-symbolic.svg</file>
     <file>icons/scalable/actions/tool-fill-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-line-symbolic.svg</file>
   </gresource>
 </gresources>

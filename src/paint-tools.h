@@ -42,6 +42,17 @@ struct _PaintTool {
                       double x,
                       double y,
                       PaintToolSettings *settings);
+  void (*draw_preview) (const PaintTool *tool,
+                        cairo_t *cr,
+                        double x0,
+                        double y0,
+                        double x1,
+                        double y1,
+                        const PaintToolSettings *settings);
+  void (*snap_point) (double x0,
+                      double y0,
+                      double *x1,
+                      double *y1);
 };
 
 PaintToolSettings *paint_tool_settings_new (void);

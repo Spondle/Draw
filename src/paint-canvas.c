@@ -201,6 +201,8 @@ struct _PaintDocument {
 
   UndoStep *active_stroke_undo;
   gboolean pre_stroke_modified;
+  double stroke_start_x;
+  double stroke_start_y;
   double prev_stroke_x;
   double prev_stroke_y;
   double prev2_stroke_x;
@@ -482,6 +484,29 @@ paint_document_redo (PaintDocument *doc)
   return TRUE;
 }
 
+static void
+compute_stroke_bounds (double x0,
+                       double y0,
+                       double x1,
+                       double y1,
+                       double stroke_size,
+                       int *rx,
+                       int *ry,
+                       int *rw,
+                       int *rh)
+{
+  int pad = (int) ceil (stroke_size / 2.0) + 4;
+  double min_x = MIN (x0, x1);
+  double max_x = MAX (x0, x1);
+  double min_y = MIN (y0, y1);
+  double max_y = MAX (y0, y1);
+
+  *rx = (int) floor (min_x) - pad;
+  *ry = (int) floor (min_y) - pad;
+  *rw = (int) ceil (max_x - min_x) + pad * 2 + 2;
+  *rh = (int) ceil (max_y - min_y) + pad * 2 + 2;
+}
+
 void
 paint_document_begin_stroke (PaintDocument *doc,
                              double x,
@@ -495,24 +520,31 @@ paint_document_begin_stroke (PaintDocument *doc,
   }
 
   doc->pre_stroke_modified = doc->modified;
+  doc->stroke_start_x = x;
+  doc->stroke_start_y = y;
+  doc->prev_stroke_x = x;
+  doc->prev_stroke_y = y;
+  doc->prev2_stroke_x = x;
+  doc->prev2_stroke_y = y;
+
+  if (tool->draw_preview) {
+    cairo_t *cr = cairo_create (doc->surface);
+    tool->begin_stroke (tool, cr, x, y, settings);
+    cairo_destroy (cr);
+    return;
+  }
 
   if (tool->uses_brush_size) {
-    int pad = (int) ceil (settings->size / 2.0) + 4;
-    int rx = (int) floor (x) - pad;
-    int ry = (int) floor (y) - pad;
-    int rsize = pad * 2 + 2;
+    int rx, ry, rw, rh;
+    compute_stroke_bounds (x, y, x, y, settings->size, &rx, &ry, &rw, &rh);
 
     doc->active_stroke_undo = undo_step_new_tiled (doc->width, doc->height);
-    doc->prev_stroke_x = x;
-    doc->prev_stroke_y = y;
-    doc->prev2_stroke_x = x;
-    doc->prev2_stroke_y = y;
-    undo_step_capture_rect (doc->active_stroke_undo, doc->surface, rx, ry, rsize, rsize);
+    undo_step_capture_rect (doc->active_stroke_undo, doc->surface, rx, ry, rw, rh);
 
     cairo_t *cr = cairo_create (doc->surface);
     tool->begin_stroke (tool, cr, x, y, settings);
     cairo_destroy (cr);
-    mark_rect_dirty (doc, rx, ry, rsize, rsize);
+    mark_rect_dirty (doc, rx, ry, rw, rh);
   } else {
     push_undo_step (doc, undo_step_new_full (doc->surface));
     cairo_t *cr = cairo_create (doc->surface);
@@ -531,6 +563,13 @@ paint_document_continue_stroke (PaintDocument *doc,
                                 const PaintTool *tool,
                                 PaintToolSettings *settings)
 {
+  if (tool->draw_preview) {
+    cairo_t *cr = cairo_create (doc->surface);
+    tool->continue_stroke (tool, cr, x, y, settings);
+    cairo_destroy (cr);
+    return;
+  }
+
   if (tool->uses_brush_size) {
     if (!doc->active_stroke_undo)
       doc->active_stroke_undo = undo_step_new_tiled (doc->width, doc->height);
@@ -573,17 +612,29 @@ paint_document_end_stroke (PaintDocument *doc,
                            const PaintTool *tool,
                            PaintToolSettings *settings)
 {
-  if (tool->uses_brush_size) {
-    int pad = (int) ceil (settings->size / 2.0) + 4;
-    double min_x = MIN (doc->prev_stroke_x, x);
-    double max_x = MAX (doc->prev_stroke_x, x);
-    double min_y = MIN (doc->prev_stroke_y, y);
-    double max_y = MAX (doc->prev_stroke_y, y);
+  if (tool->draw_preview) {
+    int rx, ry, rw, rh;
+    double stroke_size = tool->uses_brush_size ? settings->size : 1.0;
+    compute_stroke_bounds (doc->stroke_start_x, doc->stroke_start_y, x, y,
+                           stroke_size, &rx, &ry, &rw, &rh);
 
-    int rx = (int) floor (min_x) - pad;
-    int ry = (int) floor (min_y) - pad;
-    int rw = (int) ceil (max_x - min_x) + pad * 2 + 2;
-    int rh = (int) ceil (max_y - min_y) + pad * 2 + 2;
+    UndoStep *step = undo_step_new_tiled (doc->width, doc->height);
+    undo_step_capture_rect (step, doc->surface, rx, ry, rw, rh);
+
+    cairo_t *cr = cairo_create (doc->surface);
+    tool->end_stroke (tool, cr, x, y, settings);
+    cairo_destroy (cr);
+    mark_rect_dirty (doc, rx, ry, rw, rh);
+
+    push_undo_step (doc, step);
+    doc->modified = TRUE;
+    return;
+  }
+
+  if (tool->uses_brush_size) {
+    int rx, ry, rw, rh;
+    compute_stroke_bounds (doc->prev_stroke_x, doc->prev_stroke_y, x, y,
+                           settings->size, &rx, &ry, &rw, &rh);
 
     if (doc->active_stroke_undo)
       undo_step_capture_rect (doc->active_stroke_undo, doc->surface, rx, ry, rw, rh);
@@ -792,6 +843,8 @@ struct _PaintCanvas {
   double drag_start_y;
   double last_drag_off_x;
   double last_drag_off_y;
+  double preview_end_x;
+  double preview_end_y;
   gboolean show_cursor_ring;
 };
 
@@ -1352,6 +1405,37 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
                                         &GRAPHENE_RECT_INIT (x0, y0, x1 - x0, y1 - y0));
   }
 
+  if (self->drawing_active && !self->touch_stroke_pending && self->settings) {
+    const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
+    if (active_tool->draw_preview) {
+      double x0 = self->drag_start_x / self->zoom;
+      double y0 = self->drag_start_y / self->zoom;
+      double x1 = self->preview_end_x;
+      double y1 = self->preview_end_y;
+
+      double min_wx = MIN (x0, x1) * self->zoom;
+      double max_wx = MAX (x0, x1) * self->zoom;
+      double min_wy = MIN (y0, y1) * self->zoom;
+      double max_wy = MAX (y0, y1) * self->zoom;
+      double pad = (MAX (1.0, self->settings->size) * self->zoom) * 0.5 + 4.0;
+
+      float canvas_w = (float) gtk_widget_get_width (widget);
+      float canvas_h = (float) gtk_widget_get_height (widget);
+      float bx0 = MAX (0.0f, (float) floor (min_wx - pad));
+      float by0 = MAX (0.0f, (float) floor (min_wy - pad));
+      float bx1 = MIN (canvas_w, (float) ceil (max_wx + pad));
+      float by1 = MIN (canvas_h, (float) ceil (max_wy + pad));
+
+      if (bx1 > bx0 && by1 > by0) {
+        graphene_rect_t pbounds = GRAPHENE_RECT_INIT (bx0, by0, bx1 - bx0, by1 - by0);
+        cairo_t *cr = gtk_snapshot_append_cairo (snapshot, &pbounds);
+        cairo_scale (cr, self->zoom, self->zoom);
+        active_tool->draw_preview (active_tool, cr, x0, y0, x1, y1, self->settings);
+        cairo_destroy (cr);
+      }
+    }
+  }
+
   if (self->show_cursor_ring && self->has_hover && self->settings) {
     const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
     double px = self->hover_x * self->zoom;
@@ -1396,6 +1480,29 @@ is_touch_gesture (GtkGesture *gesture)
 }
 
 static void
+resolve_drag_point (PaintCanvas *self,
+                    GtkGestureDrag *gesture,
+                    const PaintTool *tool,
+                    double offset_x,
+                    double offset_y,
+                    double *out_cx,
+                    double *out_cy)
+{
+  double cx = (self->drag_start_x + offset_x) / self->zoom;
+  double cy = (self->drag_start_y + offset_y) / self->zoom;
+  if (tool->snap_point) {
+    GdkModifierType state = gtk_event_controller_get_current_event_state (GTK_EVENT_CONTROLLER (gesture));
+    if (state & GDK_SHIFT_MASK)
+      tool->snap_point (self->drag_start_x / self->zoom,
+                        self->drag_start_y / self->zoom,
+                        &cx,
+                        &cy);
+  }
+  *out_cx = cx;
+  *out_cy = cy;
+}
+
+static void
 on_drag_begin (GtkGestureDrag *gesture,
                double start_x,
                double start_y,
@@ -1421,17 +1528,20 @@ on_drag_begin (GtkGestureDrag *gesture,
   self->has_hover = !is_touch;
   self->hover_x = cx;
   self->hover_y = cy;
+  self->preview_end_x = cx;
+  self->preview_end_y = cy;
 
   if (!is_touch) {
     const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
     paint_document_begin_stroke (self->document, cx, cy, tool, self->settings);
     gtk_widget_queue_draw (GTK_WIDGET (self));
-    g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+    if (!tool->draw_preview)
+      g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
   }
 }
 
 static void
-on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
+on_drag_update (GtkGestureDrag *gesture,
                 double offset_x,
                 double offset_y,
                 gpointer user_data)
@@ -1440,8 +1550,8 @@ on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
   if (!self->drawing_active)
     return;
 
+  const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
   if (self->touch_stroke_pending) {
-    const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
     if (!tool->uses_brush_size)
       return;
     if (hypot (offset_x, offset_y) < 6.0)
@@ -1452,7 +1562,8 @@ on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
                                  self->drag_start_y / self->zoom,
                                  tool,
                                  self->settings);
-    g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+    if (!tool->draw_preview)
+      g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
   } else if (hypot (offset_x - self->last_drag_off_x, offset_y - self->last_drag_off_y) < 0.75) {
     return;
   }
@@ -1460,18 +1571,19 @@ on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
   self->last_drag_off_x = offset_x;
   self->last_drag_off_y = offset_y;
 
-  double cx = (self->drag_start_x + offset_x) / self->zoom;
-  double cy = (self->drag_start_y + offset_y) / self->zoom;
+  double cx, cy;
+  resolve_drag_point (self, gesture, tool, offset_x, offset_y, &cx, &cy);
   self->hover_x = cx;
   self->hover_y = cy;
+  self->preview_end_x = cx;
+  self->preview_end_y = cy;
 
-  const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
   paint_document_continue_stroke (self->document, cx, cy, tool, self->settings);
   gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
 static void
-on_drag_end (GtkGestureDrag *gesture G_GNUC_UNUSED,
+on_drag_end (GtkGestureDrag *gesture,
              double offset_x,
              double offset_y,
              gpointer user_data)
@@ -1491,8 +1603,8 @@ on_drag_end (GtkGestureDrag *gesture G_GNUC_UNUSED,
                                  self->settings);
   }
 
-  double cx = (self->drag_start_x + offset_x) / self->zoom;
-  double cy = (self->drag_start_y + offset_y) / self->zoom;
+  double cx, cy;
+  resolve_drag_point (self, gesture, tool, offset_x, offset_y, &cx, &cy);
   paint_document_end_stroke (self->document, cx, cy, tool, self->settings);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);

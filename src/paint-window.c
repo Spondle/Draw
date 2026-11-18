@@ -957,6 +957,13 @@ static void act_tool_brush (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_U
     paint_canvas_page_select_tool (page, "brush");
 }
 
+static void act_tool_line (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UNUSED, gpointer d)
+{
+  PaintCanvasPage *page = get_active_canvas_page (PAINT_WINDOW (d));
+  if (page)
+    paint_canvas_page_select_tool (page, "line");
+}
+
 static void act_tool_eraser (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UNUSED, gpointer d)
 {
   PaintCanvasPage *page = get_active_canvas_page (PAINT_WINDOW (d));
@@ -1006,6 +1013,10 @@ on_key_pressed (GtkEventControllerKey *ctrl G_GNUC_UNUSED,
   }
   if (keyval == GDK_KEY_b || keyval == GDK_KEY_B) {
     gtk_widget_activate_action (GTK_WIDGET (self), "win.tool-brush", NULL);
+    return TRUE;
+  }
+  if (keyval == GDK_KEY_l || keyval == GDK_KEY_L) {
+    gtk_widget_activate_action (GTK_WIDGET (self), "win.tool-line", NULL);
     return TRUE;
   }
   if (keyval == GDK_KEY_e || keyval == GDK_KEY_E) {
@@ -1365,6 +1376,7 @@ paint_window_init (PaintWindow *self)
     { "toggle-fullscreen", act_toggle_fullscreen, NULL, NULL, NULL, { 0 } },
     { "tab-overview", act_tab_overview, NULL, NULL, NULL, { 0 } },
     { "tool-brush", act_tool_brush, NULL, NULL, NULL, { 0 } },
+    { "tool-line", act_tool_line, NULL, NULL, NULL, { 0 } },
     { "tool-eraser", act_tool_eraser, NULL, NULL, NULL, { 0 } },
     { "tool-fill", act_tool_fill, NULL, NULL, NULL, { 0 } },
     { "brush-smaller", act_brush_smaller, NULL, NULL, NULL, { 0 } },
