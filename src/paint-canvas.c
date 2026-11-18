@@ -11,8 +11,8 @@
 #define MAX_OVERVIEW_DIM 2048
 
 static const double ZOOM_STEPS[] = {
-  0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.33, 0.5, 0.67, 0.75,
-  1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0
+  0.05, 0.06, 0.08, 0.10, 0.125, 0.16, 0.20, 0.25, 0.33, 0.40, 0.50, 0.60,
+  0.75, 0.90, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0
 };
 
 /* ============================================================================
@@ -200,6 +200,7 @@ struct _PaintDocument {
   GPtrArray *redo_stack; /* element-type: UndoStep* */
 
   UndoStep *active_stroke_undo;
+  gboolean pre_stroke_modified;
   double prev_stroke_x;
   double prev_stroke_y;
   double prev2_stroke_x;
@@ -493,6 +494,8 @@ paint_document_begin_stroke (PaintDocument *doc,
     doc->active_stroke_undo = NULL;
   }
 
+  doc->pre_stroke_modified = doc->modified;
+
   if (tool->uses_brush_size) {
     int pad = (int) ceil (settings->size / 2.0) + 4;
     int rx = (int) floor (x) - pad;
@@ -601,6 +604,25 @@ paint_document_end_stroke (PaintDocument *doc,
   }
 
   doc->modified = TRUE;
+}
+
+void
+paint_document_cancel_stroke (PaintDocument *doc)
+{
+  if (!doc || !doc->active_stroke_undo)
+    return;
+
+  UndoStep *step = doc->active_stroke_undo;
+  doc->active_stroke_undo = NULL;
+
+  for (guint i = 0; i < step->tiles->len; i++) {
+    const UndoTile *t = g_ptr_array_index (step->tiles, i);
+    restore_rect_tile (doc->surface, t);
+    mark_rect_dirty (doc, t->x, t->y, t->w, t->h);
+  }
+  cairo_surface_mark_dirty (doc->surface);
+  undo_step_free (step);
+  doc->modified = doc->pre_stroke_modified;
 }
 
 void
@@ -733,20 +755,23 @@ struct _PaintCanvas {
   PaintDocument *document;
   PaintToolSettings *settings; /* unowned shared settings */
 
-  /* Tier 1 (>= 50% zoom): 1:1 canvas-pixel overscanned viewport texture */
+  /* Tier 1 (>= 50% zoom, or >= 30% half-res on >4096 canvases): overscanned viewport texture */
   cairo_surface_t *vp_surface;
   GdkTexture *vp_texture;
   cairo_surface_t *vp_doc_surface;
   gboolean vp_valid;
+  int vp_div;
   int vp_x;
   int vp_y;
   int vp_w;
   int vp_h;
+  int vp_surf_w;
+  int vp_surf_h;
   gboolean vp_all_dirty;
   gboolean vp_has_dirty_rect;
   cairo_rectangle_int_t vp_dirty_rect;
 
-  /* Tier 2 (< 50% zoom): box-downsampled <= 2048x2048 overview texture */
+  /* Tier 2 (overview): box-downsampled <= 2048x2048 overview texture */
   cairo_surface_t *ov_surface;
   GdkTexture *ov_texture;
   cairo_surface_t *ov_doc_surface;
@@ -762,6 +787,7 @@ struct _PaintCanvas {
   double hover_x;
   double hover_y;
   gboolean drawing_active;
+  gboolean touch_stroke_pending;
   double drag_start_x;
   double drag_start_y;
   double last_drag_off_x;
@@ -776,6 +802,9 @@ invalidate_viewport_cache (PaintCanvas *self)
 {
   self->vp_valid = FALSE;
   self->vp_doc_surface = NULL;
+  self->vp_div = 0;
+  self->vp_surf_w = 0;
+  self->vp_surf_h = 0;
   self->vp_all_dirty = FALSE;
   self->vp_has_dirty_rect = FALSE;
   g_clear_object (&self->vp_texture);
@@ -884,11 +913,36 @@ compute_visible_widget_rect (PaintCanvas *self)
   return vis;
 }
 
+static void box_downsample_rect (cairo_surface_t *src_surf,
+                                 cairo_surface_t *dst_surf,
+                                 int div,
+                                 int src_ox,
+                                 int src_oy,
+                                 int dx0,
+                                 int dy0,
+                                 int dw,
+                                 int dh);
+
+static int
+target_vp_div (const PaintCanvas *self)
+{
+  if (!self->document)
+    return 0;
+  if (self->zoom >= 0.50)
+    return 1;
+  int max_dim = MAX (self->document->width, self->document->height);
+  if (self->zoom >= 0.30 && max_dim > MAX_OVERVIEW_DIM * 2)
+    return 2;
+  return 0;
+}
+
 static gboolean
 is_visible_covered_by_vp_cache (PaintCanvas *self, const graphene_rect_t *vis)
 {
-  if (!self->vp_valid || !self->vp_texture || !self->vp_surface ||
-      !self->document || self->vp_doc_surface != self->document->surface) {
+  int want_div = target_vp_div (self);
+  if (want_div <= 0 || !self->vp_valid || !self->vp_texture || !self->vp_surface ||
+      !self->document || self->vp_doc_surface != self->document->surface ||
+      self->vp_div != want_div) {
     return FALSE;
   }
 
@@ -906,72 +960,65 @@ is_visible_covered_by_vp_cache (PaintCanvas *self, const graphene_rect_t *vis)
 }
 
 static void
-copy_doc_rect_to_vp (PaintCanvas *self, int vx0, int vy0, int vw, int vh)
-{
-  cairo_surface_t *src_surf = self->document->surface;
-  cairo_surface_flush (src_surf);
-  int src_stride = cairo_image_surface_get_stride (src_surf);
-  const unsigned char *src = cairo_image_surface_get_data (src_surf);
-  int dst_stride = cairo_image_surface_get_stride (self->vp_surface);
-  unsigned char *dst = cairo_image_surface_get_data (self->vp_surface);
-
-  int sx0 = self->vp_x + vx0;
-  int sy0 = self->vp_y + vy0;
-  gsize row_bytes = (gsize) vw * 4;
-  for (int row = 0; row < vh; row++) {
-    const unsigned char *srow = src + (gsize) (sy0 + row) * (gsize) src_stride + (gsize) sx0 * 4;
-    unsigned char *drow = dst + (gsize) (vy0 + row) * (gsize) dst_stride + (gsize) vx0 * 4;
-    memcpy (drow, srow, row_bytes);
-  }
-  cairo_surface_mark_dirty_rectangle (self->vp_surface, vx0, vy0, vw, vh);
-}
-
-static void
 rebuild_vp_cache (PaintCanvas *self, const graphene_rect_t *vis)
 {
   PaintDocument *doc = self->document;
+  int div = target_vp_div (self);
+  if (div <= 0)
+    return;
+
   int pad = CLAMP ((int) ceil ((double) VIEWPORT_OVERSCAN / self->zoom), 64, 256);
   int req_x0 = MAX (0, (int) floor (vis->origin.x / self->zoom) - pad);
   int req_y0 = MAX (0, (int) floor (vis->origin.y / self->zoom) - pad);
   int req_x1 = MIN (doc->width, (int) ceil ((vis->origin.x + vis->size.width) / self->zoom) + pad);
   int req_y1 = MIN (doc->height, (int) ceil ((vis->origin.y + vis->size.height) / self->zoom) + pad);
 
+  req_x0 = (req_x0 / div) * div;
+  req_y0 = (req_y0 / div) * div;
+
   /* Ensure a minimum cache span so zooming 100% <-> 3200% doesn't re-copy */
-  int min_w = MIN (doc->width, MIN_VP_CACHE_DIM);
-  int min_h = MIN (doc->height, MIN_VP_CACHE_DIM);
+  int min_w = MIN (doc->width, MIN_VP_CACHE_DIM * div);
+  int min_h = MIN (doc->height, MIN_VP_CACHE_DIM * div);
   if (req_x1 - req_x0 < min_w) {
     int cx = (req_x0 + req_x1) / 2;
-    req_x0 = CLAMP (cx - min_w / 2, 0, doc->width - min_w);
-    req_x1 = req_x0 + min_w;
+    int max_x0 = MAX (0, ((doc->width - min_w) / div) * div);
+    req_x0 = CLAMP (((cx - min_w / 2) / div) * div, 0, max_x0);
+    req_x1 = MIN (doc->width, req_x0 + min_w);
   }
   if (req_y1 - req_y0 < min_h) {
     int cy = (req_y0 + req_y1) / 2;
-    req_y0 = CLAMP (cy - min_h / 2, 0, doc->height - min_h);
-    req_y1 = req_y0 + min_h;
+    int max_y0 = MAX (0, ((doc->height - min_h) / div) * div);
+    req_y0 = CLAMP (((cy - min_h / 2) / div) * div, 0, max_y0);
+    req_y1 = MIN (doc->height, req_y0 + min_h);
   }
 
   int cw = MAX (1, req_x1 - req_x0);
   int ch = MAX (1, req_y1 - req_y0);
+  int sw = MAX (1, (cw + div - 1) / div);
+  int sh = MAX (1, (ch + div - 1) / div);
 
   if (!self->vp_surface ||
-      cairo_image_surface_get_width (self->vp_surface) != cw ||
-      cairo_image_surface_get_height (self->vp_surface) != ch) {
+      cairo_image_surface_get_width (self->vp_surface) != sw ||
+      cairo_image_surface_get_height (self->vp_surface) != sh) {
     g_clear_pointer (&self->vp_surface, cairo_surface_destroy);
-    self->vp_surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, cw, ch);
+    self->vp_surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, sw, sh);
     g_clear_object (&self->vp_texture);
   }
 
+  self->vp_div = div;
   self->vp_x = req_x0;
   self->vp_y = req_y0;
   self->vp_w = cw;
   self->vp_h = ch;
+  self->vp_surf_w = sw;
+  self->vp_surf_h = sh;
   self->vp_doc_surface = doc->surface;
   self->vp_valid = TRUE;
   self->vp_all_dirty = FALSE;
   self->vp_has_dirty_rect = FALSE;
 
-  copy_doc_rect_to_vp (self, 0, 0, cw, ch);
-  GdkTexture *tex = upload_surface_texture (self->vp_surface, NULL, cw, ch, NULL);
+  box_downsample_rect (doc->surface, self->vp_surface, div, req_x0, req_y0, 0, 0, sw, sh);
+  GdkTexture *tex = upload_surface_texture (self->vp_surface, NULL, sw, sh, NULL);
   g_clear_object (&self->vp_texture);
   self->vp_texture = tex;
 }
@@ -984,12 +1031,14 @@ ensure_vp_texture (PaintCanvas *self, const graphene_rect_t *vis)
     return self->vp_texture;
   }
 
+  int div = self->vp_div;
   if (self->vp_all_dirty) {
     self->vp_all_dirty = FALSE;
     self->vp_has_dirty_rect = FALSE;
-    copy_doc_rect_to_vp (self, 0, 0, self->vp_w, self->vp_h);
+    box_downsample_rect (self->document->surface, self->vp_surface, div,
+                         self->vp_x, self->vp_y, 0, 0, self->vp_surf_w, self->vp_surf_h);
     GdkTexture *tex = upload_surface_texture (
-        self->vp_surface, NULL, self->vp_w, self->vp_h, NULL);
+        self->vp_surface, NULL, self->vp_surf_w, self->vp_surf_h, NULL);
     g_clear_object (&self->vp_texture);
     self->vp_texture = tex;
     return self->vp_texture;
@@ -999,18 +1048,26 @@ ensure_vp_texture (PaintCanvas *self, const graphene_rect_t *vis)
     cairo_rectangle_int_t d = self->vp_dirty_rect;
     self->vp_has_dirty_rect = FALSE;
 
-    int vx0 = MAX (0, d.x - self->vp_x);
-    int vy0 = MAX (0, d.y - self->vp_y);
-    int vx1 = MIN (self->vp_w, (d.x + d.width) - self->vp_x);
-    int vy1 = MIN (self->vp_h, (d.y + d.height) - self->vp_y);
+    int cx0 = MAX (self->vp_x, d.x);
+    int cy0 = MAX (self->vp_y, d.y);
+    int cx1 = MIN (self->vp_x + self->vp_w, d.x + d.width);
+    int cy1 = MIN (self->vp_y + self->vp_h, d.y + d.height);
 
-    if (vx0 < vx1 && vy0 < vy1) {
-      cairo_rectangle_int_t upd = { vx0, vy0, vx1 - vx0, vy1 - vy0 };
-      copy_doc_rect_to_vp (self, upd.x, upd.y, upd.width, upd.height);
-      GdkTexture *next = upload_surface_texture (
-          self->vp_surface, self->vp_texture, self->vp_w, self->vp_h, &upd);
-      g_set_object (&self->vp_texture, next);
-      g_object_unref (next);
+    if (cx0 < cx1 && cy0 < cy1) {
+      int vx0 = (cx0 - self->vp_x) / div;
+      int vy0 = (cy0 - self->vp_y) / div;
+      int vx1 = MIN (self->vp_surf_w, (cx1 - self->vp_x + div - 1) / div);
+      int vy1 = MIN (self->vp_surf_h, (cy1 - self->vp_y + div - 1) / div);
+
+      if (vx0 < vx1 && vy0 < vy1) {
+        cairo_rectangle_int_t upd = { vx0, vy0, vx1 - vx0, vy1 - vy0 };
+        box_downsample_rect (self->document->surface, self->vp_surface, div,
+                             self->vp_x, self->vp_y, upd.x, upd.y, upd.width, upd.height);
+        GdkTexture *next = upload_surface_texture (
+            self->vp_surface, self->vp_texture, self->vp_surf_w, self->vp_surf_h, &upd);
+        g_set_object (&self->vp_texture, next);
+        g_object_unref (next);
+      }
     }
   }
 
@@ -1051,6 +1108,8 @@ static void
 box_downsample_rect (cairo_surface_t *src_surf,
                      cairo_surface_t *dst_surf,
                      int div,
+                     int src_ox,
+                     int src_oy,
                      int dx0,
                      int dy0,
                      int dw,
@@ -1067,10 +1126,11 @@ box_downsample_rect (cairo_surface_t *src_surf,
 
   if (div == 1) {
     gsize row_bytes = (gsize) dw * 4;
+    int sx = src_ox + dx0;
     for (int row = 0; row < dh; row++) {
-      int sy = dy0 + row;
-      const unsigned char *srow = src_data + (gsize) sy * (gsize) src_stride + (gsize) dx0 * 4;
-      unsigned char *drow = dst_data + (gsize) sy * (gsize) dst_stride + (gsize) dx0 * 4;
+      int sy = src_oy + dy0 + row;
+      const unsigned char *srow = src_data + (gsize) sy * (gsize) src_stride + (gsize) sx * 4;
+      unsigned char *drow = dst_data + (gsize) (dy0 + row) * (gsize) dst_stride + (gsize) dx0 * 4;
       memcpy (drow, srow, row_bytes);
     }
     cairo_surface_mark_dirty_rectangle (dst_surf, dx0, dy0, dw, dh);
@@ -1084,11 +1144,11 @@ box_downsample_rect (cairo_surface_t *src_surf,
 
   /* Safe for 16-bit lane SWAR accumulation up to div=8 (max 64 * 255 = 16320 < 65535) */
   int shift = (div == 2) ? 2 : (div == 4) ? 4 : (div == 8) ? 6 : 0;
-  int full_x_end = src_w / div;
-  int full_y_end = src_h / div;
+  int full_x_end = MAX (0, (src_w - src_ox) / div);
+  int full_y_end = MAX (0, (src_h - src_oy) / div);
 
   for (int dy = dy0; dy < dy0 + dh; dy++) {
-    int sy0 = dy * div;
+    int sy0 = src_oy + dy * div;
     int sy1 = MIN (src_h, sy0 + div);
     uint32_t *drow = dst_px + (gsize) dy * (gsize) dst_stride_px;
     gboolean full_y = (shift > 0) && (dy < full_y_end);
@@ -1101,7 +1161,7 @@ box_downsample_rect (cairo_surface_t *src_surf,
       const uint32_t *r2 = r1 + src_stride_px;
       const uint32_t *r3 = r2 + src_stride_px;
       for (; dx < fast_end; dx++) {
-        int sx0 = dx * 4;
+        int sx0 = src_ox + dx * 4;
         uint32_t rb = 0x00080008U;
         uint32_t ag = 0x00080008U;
         for (int k = 0; k < 4; k++) {
@@ -1115,7 +1175,7 @@ box_downsample_rect (cairo_surface_t *src_surf,
     } else if (shift > 0 && full_y) {
       uint32_t bias = 0x00010001U * (1U << (shift - 1));
       for (; dx < fast_end; dx++) {
-        int sx0 = dx * div;
+        int sx0 = src_ox + dx * div;
         uint32_t rb = bias;
         uint32_t ag = bias;
         const uint32_t *row = src_px + (gsize) sy0 * (gsize) src_stride_px + sx0;
@@ -1131,7 +1191,7 @@ box_downsample_rect (cairo_surface_t *src_surf,
     }
 
     for (; dx < dx0 + dw; dx++) {
-      int sx0 = dx * div;
+      int sx0 = src_ox + dx * div;
       int sx1 = MIN (src_w, sx0 + div);
       drow[dx] = downsample_clamped_pixel (src_px, src_stride_px, sx0, sx1, sy0, sy1);
     }
@@ -1169,7 +1229,7 @@ ensure_overview_texture (PaintCanvas *self)
     self->ov_all_dirty = FALSE;
     self->ov_has_dirty_rect = FALSE;
 
-    box_downsample_rect (doc->surface, self->ov_surface, div, 0, 0, ow, oh);
+    box_downsample_rect (doc->surface, self->ov_surface, div, 0, 0, 0, 0, ow, oh);
     GdkTexture *tex = upload_surface_texture (self->ov_surface, NULL, ow, oh, NULL);
     g_clear_object (&self->ov_texture);
     self->ov_texture = tex;
@@ -1179,7 +1239,7 @@ ensure_overview_texture (PaintCanvas *self)
   if (self->ov_all_dirty) {
     self->ov_all_dirty = FALSE;
     self->ov_has_dirty_rect = FALSE;
-    box_downsample_rect (doc->surface, self->ov_surface, div, 0, 0, ow, oh);
+    box_downsample_rect (doc->surface, self->ov_surface, div, 0, 0, 0, 0, ow, oh);
     GdkTexture *tex = upload_surface_texture (self->ov_surface, NULL, ow, oh, NULL);
     g_clear_object (&self->ov_texture);
     self->ov_texture = tex;
@@ -1196,7 +1256,8 @@ ensure_overview_texture (PaintCanvas *self)
     int dy1 = CLAMP ((d.y + d.height + div - 1) / div, dy0 + 1, oh);
 
     cairo_rectangle_int_t upd = { dx0, dy0, dx1 - dx0, dy1 - dy0 };
-    box_downsample_rect (doc->surface, self->ov_surface, div, upd.x, upd.y, upd.width, upd.height);
+    box_downsample_rect (doc->surface, self->ov_surface, div, 0, 0,
+                         upd.x, upd.y, upd.width, upd.height);
     GdkTexture *next = upload_surface_texture (
         self->ov_surface, self->ov_texture, ow, oh, &upd);
     g_set_object (&self->ov_texture, next);
@@ -1255,7 +1316,7 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 
   propagate_document_dirty (self);
 
-  if (self->zoom < 0.50) {
+  if (target_vp_div (self) == 0) {
     GdkTexture *tex = ensure_overview_texture (self);
     if (!tex)
       return;
@@ -1280,8 +1341,8 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 
     float x0 = (float) (self->vp_x * self->zoom);
     float y0 = (float) (self->vp_y * self->zoom);
-    float x1 = (float) ((self->vp_x + self->vp_w) * self->zoom);
-    float y1 = (float) ((self->vp_y + self->vp_h) * self->zoom);
+    float x1 = (float) ((self->vp_x + self->vp_surf_w * self->vp_div) * self->zoom);
+    float y1 = (float) ((self->vp_y + self->vp_surf_h * self->vp_div) * self->zoom);
     GskScalingFilter filter = (self->zoom >= 2.0)
                                 ? GSK_SCALING_FILTER_NEAREST
                                 : GSK_SCALING_FILTER_LINEAR;
@@ -1318,6 +1379,22 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
   }
 }
 
+static gboolean
+is_touch_gesture (GtkGesture *gesture)
+{
+  GdkEventSequence *seq = gtk_gesture_single_get_current_sequence (GTK_GESTURE_SINGLE (gesture));
+  GdkEvent *ev = gtk_gesture_get_last_event (gesture, seq);
+  if (ev) {
+    GdkEventType et = gdk_event_get_event_type (ev);
+    if (et == GDK_TOUCH_BEGIN || et == GDK_TOUCH_UPDATE ||
+        et == GDK_TOUCH_END || et == GDK_TOUCH_CANCEL) {
+      return TRUE;
+    }
+  }
+  GdkDevice *dev = gtk_gesture_get_device (gesture);
+  return dev && gdk_device_get_source (dev) == GDK_SOURCE_TOUCHSCREEN;
+}
+
 static void
 on_drag_begin (GtkGestureDrag *gesture,
                double start_x,
@@ -1325,9 +1402,15 @@ on_drag_begin (GtkGestureDrag *gesture,
                gpointer user_data)
 {
   PaintCanvas *self = PAINT_CANVAS (user_data);
-  gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+  gboolean is_touch = is_touch_gesture (GTK_GESTURE (gesture));
+
+  /* Leave touch sequences unclaimed so parent CAPTURE zoom gesture can see a 2nd finger */
+  if (!is_touch)
+    gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+
   gtk_widget_grab_focus (GTK_WIDGET (self));
   self->drawing_active = TRUE;
+  self->touch_stroke_pending = is_touch;
   self->drag_start_x = start_x;
   self->drag_start_y = start_y;
   self->last_drag_off_x = 0.0;
@@ -1335,14 +1418,16 @@ on_drag_begin (GtkGestureDrag *gesture,
 
   double cx = start_x / self->zoom;
   double cy = start_y / self->zoom;
-  self->has_hover = TRUE;
+  self->has_hover = !is_touch;
   self->hover_x = cx;
   self->hover_y = cy;
 
-  const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
-  paint_document_begin_stroke (self->document, cx, cy, tool, self->settings);
-  gtk_widget_queue_draw (GTK_WIDGET (self));
-  g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+  if (!is_touch) {
+    const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
+    paint_document_begin_stroke (self->document, cx, cy, tool, self->settings);
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+    g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+  }
 }
 
 static void
@@ -1355,14 +1440,28 @@ on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
   if (!self->drawing_active)
     return;
 
-  if (hypot (offset_x - self->last_drag_off_x, offset_y - self->last_drag_off_y) < 0.75)
+  if (self->touch_stroke_pending) {
+    const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
+    if (!tool->uses_brush_size)
+      return;
+    if (hypot (offset_x, offset_y) < 6.0)
+      return;
+    self->touch_stroke_pending = FALSE;
+    paint_document_begin_stroke (self->document,
+                                 self->drag_start_x / self->zoom,
+                                 self->drag_start_y / self->zoom,
+                                 tool,
+                                 self->settings);
+    g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+  } else if (hypot (offset_x - self->last_drag_off_x, offset_y - self->last_drag_off_y) < 0.75) {
     return;
+  }
+
   self->last_drag_off_x = offset_x;
   self->last_drag_off_y = offset_y;
 
   double cx = (self->drag_start_x + offset_x) / self->zoom;
   double cy = (self->drag_start_y + offset_y) / self->zoom;
-  self->has_hover = TRUE;
   self->hover_x = cx;
   self->hover_y = cy;
 
@@ -1382,10 +1481,18 @@ on_drag_end (GtkGestureDrag *gesture G_GNUC_UNUSED,
     return;
 
   self->drawing_active = FALSE;
+  const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
+  if (self->touch_stroke_pending) {
+    self->touch_stroke_pending = FALSE;
+    paint_document_begin_stroke (self->document,
+                                 self->drag_start_x / self->zoom,
+                                 self->drag_start_y / self->zoom,
+                                 tool,
+                                 self->settings);
+  }
+
   double cx = (self->drag_start_x + offset_x) / self->zoom;
   double cy = (self->drag_start_y + offset_y) / self->zoom;
-
-  const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
   paint_document_end_stroke (self->document, cx, cy, tool, self->settings);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
@@ -1399,10 +1506,13 @@ on_drag_cancel (GtkGesture *gesture G_GNUC_UNUSED,
   PaintCanvas *self = PAINT_CANVAS (user_data);
   if (self->drawing_active) {
     self->drawing_active = FALSE;
-    const PaintTool *tool = paint_tools_find (self->settings->active_tool_id);
-    paint_document_end_stroke (self->document, self->hover_x, self->hover_y, tool, self->settings);
-    gtk_widget_queue_draw (GTK_WIDGET (self));
-    g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+    if (self->touch_stroke_pending) {
+      self->touch_stroke_pending = FALSE;
+    } else {
+      paint_document_cancel_stroke (self->document);
+      gtk_widget_queue_draw (GTK_WIDGET (self));
+      g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+    }
   }
 }
 
@@ -1637,7 +1747,7 @@ paint_canvas_check_viewport (PaintCanvas *self)
 {
   if (!self->document || gtk_widget_get_width (GTK_WIDGET (self)) <= 0)
     return;
-  if (self->zoom < 0.50 && self->ov_texture &&
+  if (target_vp_div (self) == 0 && self->ov_texture &&
       self->ov_doc_surface == self->document->surface) {
     return;
   }

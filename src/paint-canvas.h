@@ -47,6 +47,7 @@ void paint_document_end_stroke (PaintDocument *doc,
                                 double y,
                                 const PaintTool *tool,
                                 PaintToolSettings *settings);
+void paint_document_cancel_stroke (PaintDocument *doc);
 
 void paint_document_clear (PaintDocument *doc);
 void paint_document_resize (PaintDocument *doc, int new_width, int new_height);

@@ -288,6 +288,37 @@ test_large_canvas_tiled_undo_redo (void)
   paint_document_free (doc);
 }
 
+static void
+test_cancel_stroke_restores_without_undo (void)
+{
+  PaintDocument *doc = paint_document_new (128, 128);
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->color = (GdkRGBA) { 1.0f, 0.0f, 0.0f, 1.0f };
+  settings->size = 10.0;
+  const PaintTool *brush = paint_tools_find ("brush");
+
+  g_assert_false (paint_document_get_modified (doc));
+  g_assert_false (paint_document_can_undo (doc));
+
+  paint_document_begin_stroke (doc, 20.0, 20.0, brush, settings);
+  paint_document_continue_stroke (doc, 40.0, 20.0, brush, settings);
+  guint8 r, g, b, a;
+  read_pixel_rgba (doc, 30, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 0);
+
+  paint_document_cancel_stroke (doc);
+  read_pixel_rgba (doc, 30, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_false (paint_document_get_modified (doc));
+  g_assert_false (paint_document_can_undo (doc));
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -299,5 +330,6 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/fill_tool_and_undo", test_fill_tool_and_undo);
   g_test_add_func ("/canvas/fill_antialiased_circle_no_halo", test_fill_antialiased_circle_no_halo);
   g_test_add_func ("/canvas/large_canvas_tiled_undo_redo", test_large_canvas_tiled_undo_redo);
+  g_test_add_func ("/canvas/cancel_stroke_restores_without_undo", test_cancel_stroke_restores_without_undo);
   return g_test_run ();
 }

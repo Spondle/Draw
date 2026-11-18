@@ -2,6 +2,11 @@
 
 #include <math.h>
 
+#define WORKSPACE_MARGIN_TOP 16
+#define WORKSPACE_MARGIN_BOTTOM 72
+#define WORKSPACE_MARGIN_START 24
+#define WORKSPACE_MARGIN_END 24
+
 static const int BRUSH_PRESETS[] = { 2, 6, 12, 24, 48 };
 
 enum {
@@ -30,10 +35,112 @@ struct _PaintCanvasPage {
   double pan_start_h;
   double pan_start_v;
   double pinch_start_zoom;
+  double last_zoom;
+  gboolean has_pointer;
+  double pointer_x;
+  double pointer_y;
+  gboolean pinch_active;
+  gboolean pinch_has_anchor;
+  double pinch_doc_x;
+  double pinch_doc_y;
+  double pinch_anchor_x;
+  double pinch_anchor_y;
+  gboolean has_staged_anchor;
+  double staged_doc_x;
+  double staged_doc_y;
+  double staged_view_x;
+  double staged_view_y;
   gboolean syncing;
 };
 
 G_DEFINE_FINAL_TYPE (PaintCanvasPage, paint_canvas_page, ADW_TYPE_BIN)
+
+static void
+get_viewport_center (PaintCanvasPage *self, double *vx, double *vy)
+{
+  GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (self->scrolled);
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scrolled);
+  *vx = gtk_adjustment_get_page_size (hadj) * 0.5;
+  *vy = gtk_adjustment_get_page_size (vadj) * 0.5;
+}
+
+static void
+viewport_to_doc_point (PaintCanvasPage *self,
+                       double vx,
+                       double vy,
+                       double zoom,
+                       double *doc_x,
+                       double *doc_y)
+{
+  PaintDocument *doc = paint_canvas_get_document (self->canvas);
+  if (!doc || zoom <= 0.0) {
+    *doc_x = 0.0;
+    *doc_y = 0.0;
+    return;
+  }
+
+  double dw = (double) paint_document_get_width (doc);
+  double dh = (double) paint_document_get_height (doc);
+  graphene_point_t pt;
+  if (gtk_widget_compute_point (GTK_WIDGET (self->scrolled),
+                                GTK_WIDGET (self->canvas),
+                                &GRAPHENE_POINT_INIT ((float) vx, (float) vy),
+                                &pt)) {
+    *doc_x = CLAMP ((double) pt.x / zoom, 0.0, dw);
+    *doc_y = CLAMP ((double) pt.y / zoom, 0.0, dh);
+  } else {
+    *doc_x = dw * 0.5;
+    *doc_y = dh * 0.5;
+  }
+}
+
+static void
+stage_zoom_anchor (PaintCanvasPage *self, double vx, double vy)
+{
+  viewport_to_doc_point (self, vx, vy, self->last_zoom, &self->staged_doc_x, &self->staged_doc_y);
+  self->staged_view_x = vx;
+  self->staged_view_y = vy;
+  self->has_staged_anchor = TRUE;
+}
+
+static void
+apply_scroll_for_doc_anchor (PaintCanvasPage *self,
+                             double zoom,
+                             double doc_x,
+                             double doc_y,
+                             double view_x,
+                             double view_y)
+{
+  PaintDocument *doc = paint_canvas_get_document (self->canvas);
+  if (!doc || !gtk_widget_get_mapped (GTK_WIDGET (self->canvas)))
+    return;
+
+  GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (self->scrolled);
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scrolled);
+  double page_w = gtk_adjustment_get_page_size (hadj);
+  double page_h = gtk_adjustment_get_page_size (vadj);
+  if (page_w <= 0.0 || page_h <= 0.0)
+    return;
+
+  int cw = MAX (1, (int) lround ((double) paint_document_get_width (doc) * zoom));
+  int ch = MAX (1, (int) lround ((double) paint_document_get_height (doc) * zoom));
+  double tot_w = (double) cw + WORKSPACE_MARGIN_START + WORKSPACE_MARGIN_END;
+  double tot_h = (double) ch + WORKSPACE_MARGIN_TOP + WORKSPACE_MARGIN_BOTTOM;
+
+  double max_h = MAX (0.0, tot_w - page_w);
+  double max_v = MAX (0.0, tot_h - page_h);
+  double target_h = CLAMP ((double) WORKSPACE_MARGIN_START + doc_x * zoom - view_x, 0.0, max_h);
+  double target_v = CLAMP ((double) WORKSPACE_MARGIN_TOP + doc_y * zoom - view_y, 0.0, max_v);
+
+  /* Raise adjustment upper before setting value so zooming in does not clamp prior to layout */
+  if (tot_w > gtk_adjustment_get_upper (hadj))
+    gtk_adjustment_set_upper (hadj, tot_w);
+  gtk_adjustment_set_value (hadj, target_h);
+
+  if (tot_h > gtk_adjustment_get_upper (vadj))
+    gtk_adjustment_set_upper (vadj, tot_h);
+  gtk_adjustment_set_value (vadj, target_v);
+}
 
 static void
 on_canvas_changed (PaintCanvas *canvas G_GNUC_UNUSED, gpointer user_data)
@@ -45,10 +152,26 @@ on_canvas_changed (PaintCanvas *canvas G_GNUC_UNUSED, gpointer user_data)
 
 static void
 on_canvas_zoom_changed (PaintCanvas *canvas G_GNUC_UNUSED,
-                        double zoom G_GNUC_UNUSED,
+                        double zoom,
                         gpointer user_data)
 {
   PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  double old_zoom = self->last_zoom;
+  self->last_zoom = zoom;
+
+  double doc_x, doc_y, view_x, view_y;
+  if (self->has_staged_anchor) {
+    doc_x = self->staged_doc_x;
+    doc_y = self->staged_doc_y;
+    view_x = self->staged_view_x;
+    view_y = self->staged_view_y;
+    self->has_staged_anchor = FALSE;
+  } else {
+    get_viewport_center (self, &view_x, &view_y);
+    viewport_to_doc_point (self, view_x, view_y, old_zoom, &doc_x, &doc_y);
+  }
+  apply_scroll_for_doc_anchor (self, zoom, doc_x, doc_y, view_x, view_y);
+
   g_signal_emit (self, signals[SIGNAL_STATE_CHANGED], 0);
 }
 
@@ -99,6 +222,25 @@ on_color_changed (GObject *obj,
     self->settings->color = *rgba;
 }
 
+static void
+on_scrolled_motion (GtkEventControllerMotion *ctrl G_GNUC_UNUSED,
+                    double x,
+                    double y,
+                    gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  self->has_pointer = TRUE;
+  self->pointer_x = x;
+  self->pointer_y = y;
+}
+
+static void
+on_scrolled_leave (GtkEventControllerMotion *ctrl G_GNUC_UNUSED, gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  self->has_pointer = FALSE;
+}
+
 static gboolean
 on_scroll (GtkEventControllerScroll *ctrl,
            double dx G_GNUC_UNUSED,
@@ -108,10 +250,19 @@ on_scroll (GtkEventControllerScroll *ctrl,
   PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
   GdkModifierType state = gtk_event_controller_get_current_event_state (GTK_EVENT_CONTROLLER (ctrl));
   if (state & GDK_CONTROL_MASK) {
+    double vx, vy;
+    if (self->has_pointer) {
+      vx = self->pointer_x;
+      vy = self->pointer_y;
+    } else {
+      get_viewport_center (self, &vx, &vy);
+    }
+    stage_zoom_anchor (self, vx, vy);
     if (dy < 0)
       paint_canvas_zoom_in (self->canvas);
     else if (dy > 0)
       paint_canvas_zoom_out (self->canvas);
+    self->has_staged_anchor = FALSE;
     return TRUE;
   }
   return FALSE;
@@ -142,21 +293,95 @@ on_pan_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
 }
 
 static void
-on_pinch_begin (GtkGesture *gesture G_GNUC_UNUSED,
+get_pinch_anchor (PaintCanvasPage *self, GtkGesture *gesture, double *ax, double *ay)
+{
+  if (gtk_gesture_get_bounding_box_center (gesture, ax, ay))
+    return;
+  if (self->has_pointer) {
+    *ax = self->pointer_x;
+    *ay = self->pointer_y;
+    return;
+  }
+  get_viewport_center (self, ax, ay);
+}
+
+static void
+on_pinch_begin (GtkGesture *gesture,
                 GdkEventSequence *seq G_GNUC_UNUSED,
                 gpointer user_data)
 {
   PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  gtk_gesture_set_state (gesture, GTK_EVENT_SEQUENCE_CLAIMED);
+  self->pinch_active = TRUE;
   self->pinch_start_zoom = paint_canvas_get_zoom (self->canvas);
+
+  double ax, ay;
+  get_pinch_anchor (self, gesture, &ax, &ay);
+  viewport_to_doc_point (self, ax, ay, self->pinch_start_zoom,
+                         &self->pinch_doc_x, &self->pinch_doc_y);
+  self->pinch_anchor_x = ax;
+  self->pinch_anchor_y = ay;
+  self->pinch_has_anchor = TRUE;
 }
 
 static void
-on_pinch_scale_changed (GtkGestureZoom *gesture G_GNUC_UNUSED,
+on_pinch_scale_changed (GtkGestureZoom *gesture,
                         double scale,
                         gpointer user_data)
 {
   PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  double ax = self->pinch_anchor_x;
+  double ay = self->pinch_anchor_y;
+  get_pinch_anchor (self, GTK_GESTURE (gesture), &ax, &ay);
+  self->pinch_anchor_x = ax;
+  self->pinch_anchor_y = ay;
+
+  if (self->pinch_has_anchor) {
+    self->staged_doc_x = self->pinch_doc_x;
+    self->staged_doc_y = self->pinch_doc_y;
+    self->staged_view_x = ax;
+    self->staged_view_y = ay;
+    self->has_staged_anchor = TRUE;
+  }
   paint_canvas_set_zoom (self->canvas, self->pinch_start_zoom * scale);
+  self->has_staged_anchor = FALSE;
+}
+
+static void
+on_pinch_update (GtkGesture *gesture,
+                 GdkEventSequence *seq,
+                 gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  if (!self->pinch_active || !self->pinch_has_anchor || !gtk_gesture_is_recognized (gesture))
+    return;
+
+  GdkEvent *ev = gtk_gesture_get_last_event (gesture, seq);
+  if (!ev || gdk_event_get_event_type (ev) != GDK_TOUCH_UPDATE)
+    return;
+
+  double ax, ay;
+  if (gtk_gesture_get_bounding_box_center (gesture, &ax, &ay) &&
+      hypot (ax - self->pinch_anchor_x, ay - self->pinch_anchor_y) >= 0.5) {
+    self->pinch_anchor_x = ax;
+    self->pinch_anchor_y = ay;
+    apply_scroll_for_doc_anchor (self,
+                                 paint_canvas_get_zoom (self->canvas),
+                                 self->pinch_doc_x,
+                                 self->pinch_doc_y,
+                                 ax,
+                                 ay);
+  }
+}
+
+static void
+on_pinch_end (GtkGesture *gesture G_GNUC_UNUSED,
+              GdkEventSequence *seq G_GNUC_UNUSED,
+              gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  self->pinch_active = FALSE;
+  self->pinch_has_anchor = FALSE;
 }
 
 static GtkPopover *
@@ -235,10 +460,10 @@ build_ui (PaintCanvasPage *self)
   gtk_widget_set_vexpand (container, TRUE);
   gtk_widget_set_halign (container, GTK_ALIGN_CENTER);
   gtk_widget_set_valign (container, GTK_ALIGN_CENTER);
-  gtk_widget_set_margin_top (container, 16);
-  gtk_widget_set_margin_bottom (container, 72);
-  gtk_widget_set_margin_start (container, 24);
-  gtk_widget_set_margin_end (container, 24);
+  gtk_widget_set_margin_top (container, WORKSPACE_MARGIN_TOP);
+  gtk_widget_set_margin_bottom (container, WORKSPACE_MARGIN_BOTTOM);
+  gtk_widget_set_margin_start (container, WORKSPACE_MARGIN_START);
+  gtk_widget_set_margin_end (container, WORKSPACE_MARGIN_END);
   gtk_box_append (GTK_BOX (container), GTK_WIDGET (self->canvas));
 
   gtk_scrolled_window_set_child (self->scrolled, container);
@@ -246,6 +471,12 @@ build_ui (PaintCanvasPage *self)
   if (GTK_IS_VIEWPORT (viewport))
     gtk_viewport_set_scroll_to_focus (GTK_VIEWPORT (viewport), FALSE);
   gtk_overlay_set_child (self->overlay, GTK_WIDGET (self->scrolled));
+
+  GtkEventController *motion = gtk_event_controller_motion_new ();
+  gtk_event_controller_set_propagation_phase (motion, GTK_PHASE_CAPTURE);
+  g_signal_connect (motion, "motion", G_CALLBACK (on_scrolled_motion), self);
+  g_signal_connect (motion, "leave", G_CALLBACK (on_scrolled_leave), self);
+  gtk_widget_add_controller (GTK_WIDGET (self->scrolled), motion);
 
   GtkEventController *scroll = gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
   g_signal_connect (scroll, "scroll", G_CALLBACK (on_scroll), self);
@@ -258,8 +489,12 @@ build_ui (PaintCanvasPage *self)
   gtk_widget_add_controller (GTK_WIDGET (self->scrolled), GTK_EVENT_CONTROLLER (pan));
 
   GtkGesture *pinch = gtk_gesture_zoom_new ();
+  gtk_event_controller_set_propagation_phase (GTK_EVENT_CONTROLLER (pinch), GTK_PHASE_CAPTURE);
   g_signal_connect (pinch, "begin", G_CALLBACK (on_pinch_begin), self);
   g_signal_connect (pinch, "scale-changed", G_CALLBACK (on_pinch_scale_changed), self);
+  g_signal_connect (pinch, "update", G_CALLBACK (on_pinch_update), self);
+  g_signal_connect (pinch, "end", G_CALLBACK (on_pinch_end), self);
+  g_signal_connect (pinch, "cancel", G_CALLBACK (on_pinch_end), self);
   gtk_widget_add_controller (GTK_WIDGET (self->scrolled), GTK_EVENT_CONTROLLER (pinch));
 
   GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (self->scrolled);
@@ -368,6 +603,7 @@ static void
 paint_canvas_page_init (PaintCanvasPage *self)
 {
   self->tool_buttons = g_hash_table_new (g_str_hash, g_str_equal);
+  self->last_zoom = 1.0;
 }
 
 PaintCanvasPage *
@@ -376,6 +612,7 @@ paint_canvas_page_new (PaintDocument *doc, PaintToolSettings *settings)
   PaintCanvasPage *self = g_object_new (PAINT_TYPE_CANVAS_PAGE, NULL);
   self->settings = settings;
   self->canvas = paint_canvas_new (doc, settings);
+  self->last_zoom = paint_canvas_get_zoom (self->canvas);
   build_ui (self);
   paint_canvas_page_sync_controls (self);
   return self;
