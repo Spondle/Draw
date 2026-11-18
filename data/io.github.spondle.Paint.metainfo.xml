@@ -39,6 +39,16 @@
   </supports>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.1.1" date="2026-11-18">
+      <description>
+        <p>Performance, zoom, and touchscreen improvements:</p>
+        <ul>
+          <li>Fast, seam-free drawing and zooming on large canvases up to 3200%</li>
+          <li>Two-finger touchscreen pinch-to-zoom and pan support</li>
+          <li>Cursor-anchored zooming and smoother low-zoom step transitions</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-17">
       <description>
         <p>Initial release with tabbed canvases, brush, eraser, flood fill, session restore, and Adwaita preferences.</p>
