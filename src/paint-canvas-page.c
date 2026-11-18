@@ -201,6 +201,22 @@ build_size_popover (PaintCanvasPage *self)
 }
 
 static void
+on_adjustment_changed (GtkAdjustment *adj G_GNUC_UNUSED, gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  paint_canvas_check_viewport (self->canvas);
+}
+
+static void
+on_adjustment_prop_changed (GObject *obj G_GNUC_UNUSED,
+                            GParamSpec *pspec G_GNUC_UNUSED,
+                            gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  paint_canvas_check_viewport (self->canvas);
+}
+
+static void
 build_ui (PaintCanvasPage *self)
 {
   self->overlay = GTK_OVERLAY (gtk_overlay_new ());
@@ -245,6 +261,13 @@ build_ui (PaintCanvasPage *self)
   g_signal_connect (pinch, "begin", G_CALLBACK (on_pinch_begin), self);
   g_signal_connect (pinch, "scale-changed", G_CALLBACK (on_pinch_scale_changed), self);
   gtk_widget_add_controller (GTK_WIDGET (self->scrolled), GTK_EVENT_CONTROLLER (pinch));
+
+  GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (self->scrolled);
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scrolled);
+  g_signal_connect (hadj, "value-changed", G_CALLBACK (on_adjustment_changed), self);
+  g_signal_connect (vadj, "value-changed", G_CALLBACK (on_adjustment_changed), self);
+  g_signal_connect (hadj, "notify::page-size", G_CALLBACK (on_adjustment_prop_changed), self);
+  g_signal_connect (vadj, "notify::page-size", G_CALLBACK (on_adjustment_prop_changed), self);
 
   /* Floating OSD pill */
   GtkWidget *pill = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);

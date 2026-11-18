@@ -5,7 +5,7 @@
 
 #define MAX_UNDO_STEPS 40
 #define UNDO_TILE_SIZE 256
-#define GPU_TILE_SIZE 512
+#define VIEWPORT_OVERSCAN 192
 
 static const double ZOOM_STEPS[] = {
   0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.33, 0.5, 0.67, 0.75,
@@ -713,7 +713,7 @@ paint_document_save_to_file (PaintDocument *doc, GFile *file, GError **error)
 }
 
 /* ============================================================================
- * PaintCanvas (GPU-tiled GtkWidget with viewport culling, seamless quads)
+ * PaintCanvas (Overscanned Single-Viewport-Texture GtkWidget)
  * ============================================================================ */
 
 enum {
@@ -729,11 +729,17 @@ struct _PaintCanvas {
 
   PaintDocument *document;
   PaintToolSettings *settings; /* unowned shared settings */
-  GPtrArray *gpu_tiles;        /* element-type: GdkTexture* (nullable) */
-  int tile_cols;
-  int tile_rows;
-  int cached_doc_w;
-  int cached_doc_h;
+
+  cairo_surface_t *vp_surface;
+  GdkTexture *vp_texture;
+  cairo_surface_t *cached_doc_surface;
+  gboolean vp_valid;
+  gboolean vp_is_scaled;
+  double vp_zoom;
+  int vp_x;
+  int vp_y;
+  int vp_w;
+  int vp_h;
 
   double zoom;
   gboolean has_hover;
@@ -742,138 +748,238 @@ struct _PaintCanvas {
   gboolean drawing_active;
   double drag_start_x;
   double drag_start_y;
+  double last_drag_off_x;
+  double last_drag_off_y;
   gboolean show_cursor_ring;
 };
 
 G_DEFINE_FINAL_TYPE (PaintCanvas, paint_canvas, GTK_TYPE_WIDGET)
 
 static void
-nullable_object_unref (gpointer ptr)
+invalidate_viewport_cache (PaintCanvas *self)
 {
-  if (ptr)
-    g_object_unref (ptr);
+  self->vp_valid = FALSE;
+  self->cached_doc_surface = NULL;
+  g_clear_object (&self->vp_texture);
 }
 
-static void
-rebuild_gpu_tile_grid (PaintCanvas *self)
+static graphene_rect_t
+compute_visible_widget_rect (PaintCanvas *self)
 {
-  if (!self->gpu_tiles)
-    self->gpu_tiles = g_ptr_array_new_with_free_func (nullable_object_unref);
-  g_ptr_array_set_size (self->gpu_tiles, 0);
+  float draw_w = (float) gtk_widget_get_width (GTK_WIDGET (self));
+  float draw_h = (float) gtk_widget_get_height (GTK_WIDGET (self));
+  graphene_rect_t vis = GRAPHENE_RECT_INIT (0.0f, 0.0f, draw_w, draw_h);
+  if (draw_w <= 0.0f || draw_h <= 0.0f)
+    return vis;
 
-  if (!self->document) {
-    self->tile_cols = 0;
-    self->tile_rows = 0;
-    self->cached_doc_w = 0;
-    self->cached_doc_h = 0;
-    return;
+  GtkWidget *scrolled = gtk_widget_get_ancestor (GTK_WIDGET (self), GTK_TYPE_SCROLLED_WINDOW);
+  if (scrolled) {
+    graphene_rect_t computed;
+    if (gtk_widget_compute_bounds (scrolled, GTK_WIDGET (self), &computed))
+      graphene_rect_intersection (&vis, &computed, &vis);
+  }
+  return vis;
+}
+
+static gboolean
+is_visible_covered_by_cache (PaintCanvas *self, const graphene_rect_t *vis)
+{
+  if (!self->vp_valid || !self->vp_texture || !self->vp_surface ||
+      !self->document || self->cached_doc_surface != self->document->surface) {
+    return FALSE;
   }
 
-  self->cached_doc_w = self->document->width;
-  self->cached_doc_h = self->document->height;
-  self->tile_cols = (self->cached_doc_w + GPU_TILE_SIZE - 1) / GPU_TILE_SIZE;
-  self->tile_rows = (self->cached_doc_h + GPU_TILE_SIZE - 1) / GPU_TILE_SIZE;
-  g_ptr_array_set_size (self->gpu_tiles, (guint) (self->tile_cols * self->tile_rows));
-}
+  gboolean want_scaled = (self->zoom < 1.0);
+  if (self->vp_is_scaled != want_scaled)
+    return FALSE;
+  if (want_scaled && fabs (self->vp_zoom - self->zoom) > 1e-4)
+    return FALSE;
 
-static void
-invalidate_all_gpu_tiles (PaintCanvas *self)
-{
-  if (!self->gpu_tiles)
-    return;
-  for (guint i = 0; i < self->gpu_tiles->len; i++) {
-    if (self->gpu_tiles->pdata[i]) {
-      g_object_unref (self->gpu_tiles->pdata[i]);
-      self->gpu_tiles->pdata[i] = NULL;
-    }
+  int req_x0, req_y0, req_x1, req_y1;
+  if (want_scaled) {
+    int draw_w = MAX (1, (int) lround (self->document->width * self->zoom));
+    int draw_h = MAX (1, (int) lround (self->document->height * self->zoom));
+    req_x0 = MAX (0, (int) floor (vis->origin.x));
+    req_y0 = MAX (0, (int) floor (vis->origin.y));
+    req_x1 = MIN (draw_w, (int) ceil (vis->origin.x + vis->size.width));
+    req_y1 = MIN (draw_h, (int) ceil (vis->origin.y + vis->size.height));
+  } else {
+    req_x0 = MAX (0, (int) floor (vis->origin.x / self->zoom));
+    req_y0 = MAX (0, (int) floor (vis->origin.y / self->zoom));
+    req_x1 = MIN (self->document->width, (int) ceil ((vis->origin.x + vis->size.width) / self->zoom));
+    req_y1 = MIN (self->document->height, (int) ceil ((vis->origin.y + vis->size.height) / self->zoom));
   }
+
+  return req_x0 >= self->vp_x &&
+         req_y0 >= self->vp_y &&
+         req_x1 <= self->vp_x + self->vp_w &&
+         req_y1 <= self->vp_y + self->vp_h;
 }
 
 static void
-sync_dirty_gpu_tiles (PaintCanvas *self)
+upload_viewport_texture (PaintCanvas *self, const cairo_rectangle_int_t *update_rect)
+{
+  cairo_surface_flush (self->vp_surface);
+  int stride = cairo_image_surface_get_stride (self->vp_surface);
+  const unsigned char *data = cairo_image_surface_get_data (self->vp_surface);
+  g_autoptr (GBytes) bytes = g_bytes_new (data, (gsize) stride * (gsize) self->vp_h);
+
+#if GTK_CHECK_VERSION (4, 16, 0)
+  if (update_rect && self->vp_texture &&
+      update_rect->width > 0 && update_rect->height > 0) {
+    cairo_region_t *region = cairo_region_create_rectangle (update_rect);
+    g_autoptr (GdkMemoryTextureBuilder) builder = gdk_memory_texture_builder_new ();
+    gdk_memory_texture_builder_set_width (builder, self->vp_w);
+    gdk_memory_texture_builder_set_height (builder, self->vp_h);
+    gdk_memory_texture_builder_set_format (builder, GDK_MEMORY_DEFAULT);
+    gdk_memory_texture_builder_set_stride (builder, (gsize) stride);
+    gdk_memory_texture_builder_set_bytes (builder, bytes);
+    gdk_memory_texture_builder_set_update_texture (builder, self->vp_texture);
+    gdk_memory_texture_builder_set_update_region (builder, region);
+
+    GdkTexture *updated = gdk_memory_texture_builder_build (builder);
+    g_set_object (&self->vp_texture, updated);
+    g_object_unref (updated);
+    cairo_region_destroy (region);
+    return;
+  }
+#else
+  (void) update_rect;
+#endif
+
+  g_clear_object (&self->vp_texture);
+  self->vp_texture = gdk_memory_texture_new (
+      self->vp_w, self->vp_h, GDK_MEMORY_DEFAULT, bytes, (gsize) stride);
+}
+
+static void
+render_doc_rect_to_viewport (PaintCanvas *self, int vx0, int vy0, int vw, int vh)
 {
   PaintDocument *doc = self->document;
-  if (!doc)
-    return;
+  if (!self->vp_is_scaled) {
+    cairo_surface_flush (doc->surface);
+    int src_stride = cairo_image_surface_get_stride (doc->surface);
+    const unsigned char *src = cairo_image_surface_get_data (doc->surface);
+    int dst_stride = cairo_image_surface_get_stride (self->vp_surface);
+    unsigned char *dst = cairo_image_surface_get_data (self->vp_surface);
 
-  if (!self->gpu_tiles ||
-      self->cached_doc_w != doc->width ||
-      self->cached_doc_h != doc->height) {
-    rebuild_gpu_tile_grid (self);
-    doc->all_dirty = FALSE;
-    doc->has_dirty_rect = FALSE;
-    return;
-  }
-
-  if (doc->all_dirty) {
-    invalidate_all_gpu_tiles (self);
-    doc->all_dirty = FALSE;
-    doc->has_dirty_rect = FALSE;
-    return;
-  }
-
-  if (!doc->has_dirty_rect)
-    return;
-
-  int dx0 = doc->dirty_rect.x;
-  int dy0 = doc->dirty_rect.y;
-  int dx1 = dx0 + doc->dirty_rect.width;
-  int dy1 = dy0 + doc->dirty_rect.height;
-  doc->has_dirty_rect = FALSE;
-
-  int x0 = MAX (0, dx0);
-  int y0 = MAX (0, dy0);
-  int x1 = MIN (doc->width, dx1);
-  int y1 = MIN (doc->height, dy1);
-  if (x0 >= x1 || y0 >= y1)
-    return;
-
-  int tx0 = x0 / GPU_TILE_SIZE;
-  int ty0 = y0 / GPU_TILE_SIZE;
-  int tx1 = (x1 - 1) / GPU_TILE_SIZE;
-  int ty1 = (y1 - 1) / GPU_TILE_SIZE;
-
-  for (int ty = ty0; ty <= ty1; ty++) {
-    for (int tx = tx0; tx <= tx1; tx++) {
-      guint idx = (guint) (ty * self->tile_cols + tx);
-      if (idx < self->gpu_tiles->len && self->gpu_tiles->pdata[idx]) {
-        g_object_unref (self->gpu_tiles->pdata[idx]);
-        self->gpu_tiles->pdata[idx] = NULL;
-      }
+    int sx0 = self->vp_x + vx0;
+    int sy0 = self->vp_y + vy0;
+    gsize row_bytes = (gsize) vw * 4;
+    for (int row = 0; row < vh; row++) {
+      const unsigned char *srow = src + (gsize) (sy0 + row) * (gsize) src_stride + (gsize) sx0 * 4;
+      unsigned char *drow = dst + (gsize) (vy0 + row) * (gsize) dst_stride + (gsize) vx0 * 4;
+      memcpy (drow, srow, row_bytes);
     }
+    cairo_surface_mark_dirty_rectangle (self->vp_surface, vx0, vy0, vw, vh);
+  } else {
+    cairo_t *cr = cairo_create (self->vp_surface);
+    cairo_rectangle (cr, vx0, vy0, vw, vh);
+    cairo_clip (cr);
+    cairo_set_operator (cr, CAIRO_OPERATOR_SOURCE);
+    cairo_translate (cr, -self->vp_x, -self->vp_y);
+    cairo_scale (cr, self->vp_zoom, self->vp_zoom);
+    cairo_set_source_surface (cr, doc->surface, 0, 0);
+    cairo_pattern_set_filter (cairo_get_source (cr), CAIRO_FILTER_GOOD);
+    cairo_paint (cr);
+    cairo_destroy (cr);
   }
+}
+
+static void
+rebuild_viewport_cache (PaintCanvas *self, const graphene_rect_t *vis)
+{
+  PaintDocument *doc = self->document;
+  gboolean scaled = (self->zoom < 1.0);
+  int cx0, cy0, cx1, cy1;
+
+  if (scaled) {
+    int draw_w = MAX (1, (int) lround (doc->width * self->zoom));
+    int draw_h = MAX (1, (int) lround (doc->height * self->zoom));
+    cx0 = MAX (0, (int) floor (vis->origin.x) - VIEWPORT_OVERSCAN);
+    cy0 = MAX (0, (int) floor (vis->origin.y) - VIEWPORT_OVERSCAN);
+    cx1 = MIN (draw_w, (int) ceil (vis->origin.x + vis->size.width) + VIEWPORT_OVERSCAN);
+    cy1 = MIN (draw_h, (int) ceil (vis->origin.y + vis->size.height) + VIEWPORT_OVERSCAN);
+  } else {
+    int pad = MAX (32, (int) ceil ((double) VIEWPORT_OVERSCAN / self->zoom));
+    cx0 = MAX (0, (int) floor (vis->origin.x / self->zoom) - pad);
+    cy0 = MAX (0, (int) floor (vis->origin.y / self->zoom) - pad);
+    cx1 = MIN (doc->width, (int) ceil ((vis->origin.x + vis->size.width) / self->zoom) + pad);
+    cy1 = MIN (doc->height, (int) ceil ((vis->origin.y + vis->size.height) / self->zoom) + pad);
+  }
+
+  int cw = MAX (1, cx1 - cx0);
+  int ch = MAX (1, cy1 - cy0);
+
+  if (!self->vp_surface ||
+      cairo_image_surface_get_width (self->vp_surface) != cw ||
+      cairo_image_surface_get_height (self->vp_surface) != ch) {
+    g_clear_pointer (&self->vp_surface, cairo_surface_destroy);
+    self->vp_surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, cw, ch);
+    g_clear_object (&self->vp_texture);
+  }
+
+  self->vp_is_scaled = scaled;
+  self->vp_zoom = self->zoom;
+  self->vp_x = cx0;
+  self->vp_y = cy0;
+  self->vp_w = cw;
+  self->vp_h = ch;
+  self->cached_doc_surface = doc->surface;
+  self->vp_valid = TRUE;
+
+  render_doc_rect_to_viewport (self, 0, 0, cw, ch);
+  upload_viewport_texture (self, NULL);
+
+  doc->all_dirty = FALSE;
+  doc->has_dirty_rect = FALSE;
 }
 
 static GdkTexture *
-ensure_gpu_tile (PaintCanvas *self, int tx, int ty)
+ensure_viewport_texture (PaintCanvas *self, const graphene_rect_t *vis)
 {
-  guint idx = (guint) (ty * self->tile_cols + tx);
-  if (self->gpu_tiles->pdata[idx])
-    return GDK_TEXTURE (self->gpu_tiles->pdata[idx]);
+  PaintDocument *doc = self->document;
+  if (!doc || !doc->surface)
+    return NULL;
 
-  cairo_surface_t *surface = self->document->surface;
-  cairo_surface_flush (surface);
-  int doc_w = self->document->width;
-  int doc_h = self->document->height;
-  int stride = cairo_image_surface_get_stride (surface);
-  const unsigned char *src = cairo_image_surface_get_data (surface);
-
-  int x0 = tx * GPU_TILE_SIZE;
-  int y0 = ty * GPU_TILE_SIZE;
-  int tw = MIN (GPU_TILE_SIZE, doc_w - x0);
-  int th = MIN (GPU_TILE_SIZE, doc_h - y0);
-
-  gsize row_bytes = (gsize) tw * 4;
-  unsigned char *buf = g_malloc (row_bytes * (gsize) th);
-  for (int row = 0; row < th; row++) {
-    const unsigned char *src_row = src + (gsize) (y0 + row) * (gsize) stride + (gsize) x0 * 4;
-    memcpy (buf + (gsize) row * row_bytes, src_row, row_bytes);
+  if (!is_visible_covered_by_cache (self, vis)) {
+    rebuild_viewport_cache (self, vis);
+    return self->vp_texture;
   }
 
-  g_autoptr (GBytes) bytes = g_bytes_new_take (buf, row_bytes * (gsize) th);
-  GdkTexture *tex = gdk_memory_texture_new (tw, th, GDK_MEMORY_DEFAULT, bytes, row_bytes);
-  self->gpu_tiles->pdata[idx] = tex;
-  return tex;
+  if (doc->all_dirty) {
+    doc->all_dirty = FALSE;
+    doc->has_dirty_rect = FALSE;
+    render_doc_rect_to_viewport (self, 0, 0, self->vp_w, self->vp_h);
+    upload_viewport_texture (self, NULL);
+    return self->vp_texture;
+  }
+
+  if (doc->has_dirty_rect) {
+    cairo_rectangle_int_t d = doc->dirty_rect;
+    doc->has_dirty_rect = FALSE;
+
+    int vx0, vy0, vx1, vy1;
+    if (!self->vp_is_scaled) {
+      vx0 = MAX (0, d.x - self->vp_x);
+      vy0 = MAX (0, d.y - self->vp_y);
+      vx1 = MIN (self->vp_w, (d.x + d.width) - self->vp_x);
+      vy1 = MIN (self->vp_h, (d.y + d.height) - self->vp_y);
+    } else {
+      vx0 = MAX (0, (int) floor (d.x * self->vp_zoom) - 2 - self->vp_x);
+      vy0 = MAX (0, (int) floor (d.y * self->vp_zoom) - 2 - self->vp_y);
+      vx1 = MIN (self->vp_w, (int) ceil ((d.x + d.width) * self->vp_zoom) + 2 - self->vp_x);
+      vy1 = MIN (self->vp_h, (int) ceil ((d.y + d.height) * self->vp_zoom) + 2 - self->vp_y);
+    }
+
+    if (vx0 < vx1 && vy0 < vy1) {
+      cairo_rectangle_int_t upd = { vx0, vy0, vx1 - vx0, vy1 - vy0 };
+      render_doc_rect_to_viewport (self, upd.x, upd.y, upd.width, upd.height);
+      upload_viewport_texture (self, &upd);
+    }
+  }
+
+  return self->vp_texture;
 }
 
 static void
@@ -925,53 +1031,32 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
   if (!self->document)
     return;
 
-  sync_dirty_gpu_tiles (self);
-
-  float draw_w = (float) gtk_widget_get_width (widget);
-  float draw_h = (float) gtk_widget_get_height (widget);
-  if (draw_w <= 0.0f || draw_h <= 0.0f)
+  graphene_rect_t vis_rect = compute_visible_widget_rect (self);
+  if (vis_rect.size.width <= 0.0f || vis_rect.size.height <= 0.0f)
     return;
 
-  graphene_rect_t vis_rect = GRAPHENE_RECT_INIT (0.0f, 0.0f, draw_w, draw_h);
-  GtkWidget *scrolled = gtk_widget_get_ancestor (widget, GTK_TYPE_SCROLLED_WINDOW);
-  if (scrolled) {
-    graphene_rect_t computed;
-    if (gtk_widget_compute_bounds (scrolled, widget, &computed))
-      graphene_rect_intersection (&vis_rect, &computed, &vis_rect);
+  GdkTexture *tex = ensure_viewport_texture (self, &vis_rect);
+  if (!tex)
+    return;
+
+  graphene_rect_t bounds;
+  GskScalingFilter filter;
+  if (self->vp_is_scaled) {
+    bounds = GRAPHENE_RECT_INIT ((float) self->vp_x,
+                                 (float) self->vp_y,
+                                 (float) self->vp_w,
+                                 (float) self->vp_h);
+    filter = GSK_SCALING_FILTER_LINEAR;
+  } else {
+    float x0 = (float) (self->vp_x * self->zoom);
+    float y0 = (float) (self->vp_y * self->zoom);
+    float x1 = (float) ((self->vp_x + self->vp_w) * self->zoom);
+    float y1 = (float) ((self->vp_y + self->vp_h) * self->zoom);
+    bounds = GRAPHENE_RECT_INIT (x0, y0, x1 - x0, y1 - y0);
+    filter = (self->zoom >= 2.0) ? GSK_SCALING_FILTER_NEAREST : GSK_SCALING_FILTER_LINEAR;
   }
 
-  GskScalingFilter filter = GSK_SCALING_FILTER_LINEAR;
-  if (self->zoom >= 2.0)
-    filter = GSK_SCALING_FILTER_NEAREST;
-  else if (self->zoom < 0.5)
-    filter = GSK_SCALING_FILTER_TRILINEAR;
-
-  int doc_w = self->document->width;
-  int doc_h = self->document->height;
-  int vx0 = MAX (0, (int) floor (vis_rect.origin.x / self->zoom) / GPU_TILE_SIZE);
-  int vy0 = MAX (0, (int) floor (vis_rect.origin.y / self->zoom) / GPU_TILE_SIZE);
-  int vx1 = MIN (self->tile_cols - 1,
-                 (int) floor ((vis_rect.origin.x + vis_rect.size.width) / self->zoom) / GPU_TILE_SIZE);
-  int vy1 = MIN (self->tile_rows - 1,
-                 (int) floor ((vis_rect.origin.y + vis_rect.size.height) / self->zoom) / GPU_TILE_SIZE);
-
-  for (int ty = vy0; ty <= vy1; ty++) {
-    int y0 = ty * GPU_TILE_SIZE;
-    int th = MIN (GPU_TILE_SIZE, doc_h - y0);
-    float qy0 = (float) (y0 * self->zoom);
-    float qy1 = (float) ((y0 + th) * self->zoom) + (ty + 1 < self->tile_rows ? 0.5f : 0.0f);
-
-    for (int tx = vx0; tx <= vx1; tx++) {
-      int x0 = tx * GPU_TILE_SIZE;
-      int tw = MIN (GPU_TILE_SIZE, doc_w - x0);
-      float qx0 = (float) (x0 * self->zoom);
-      float qx1 = (float) ((x0 + tw) * self->zoom) + (tx + 1 < self->tile_cols ? 0.5f : 0.0f);
-
-      GdkTexture *tex = ensure_gpu_tile (self, tx, ty);
-      graphene_rect_t bounds = GRAPHENE_RECT_INIT (qx0, qy0, qx1 - qx0, qy1 - qy0);
-      gtk_snapshot_append_scaled_texture (snapshot, tex, filter, &bounds);
-    }
-  }
+  gtk_snapshot_append_scaled_texture (snapshot, tex, filter, &bounds);
 
   if (self->show_cursor_ring && self->has_hover && self->settings) {
     const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
@@ -1012,6 +1097,8 @@ on_drag_begin (GtkGestureDrag *gesture,
   self->drawing_active = TRUE;
   self->drag_start_x = start_x;
   self->drag_start_y = start_y;
+  self->last_drag_off_x = 0.0;
+  self->last_drag_off_y = 0.0;
 
   double cx = start_x / self->zoom;
   double cy = start_y / self->zoom;
@@ -1034,6 +1121,11 @@ on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED,
   PaintCanvas *self = PAINT_CANVAS (user_data);
   if (!self->drawing_active)
     return;
+
+  if (hypot (offset_x - self->last_drag_off_x, offset_y - self->last_drag_off_y) < 0.75)
+    return;
+  self->last_drag_off_x = offset_x;
+  self->last_drag_off_y = offset_y;
 
   double cx = (self->drag_start_x + offset_x) / self->zoom;
   double cy = (self->drag_start_y + offset_y) / self->zoom;
@@ -1108,7 +1200,8 @@ static void
 paint_canvas_finalize (GObject *object)
 {
   PaintCanvas *self = PAINT_CANVAS (object);
-  g_clear_pointer (&self->gpu_tiles, g_ptr_array_unref);
+  invalidate_viewport_cache (self);
+  g_clear_pointer (&self->vp_surface, cairo_surface_destroy);
   g_clear_pointer (&self->document, paint_document_free);
   G_OBJECT_CLASS (paint_canvas_parent_class)->finalize (object);
 }
@@ -1140,7 +1233,6 @@ paint_canvas_init (PaintCanvas *self)
 {
   self->zoom = 1.0;
   self->show_cursor_ring = TRUE;
-  self->gpu_tiles = g_ptr_array_new_with_free_func (nullable_object_unref);
 
   gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-frame");
   gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-shadow");
@@ -1170,7 +1262,7 @@ paint_canvas_new (PaintDocument *doc, PaintToolSettings *settings)
   self->document = doc ? doc : paint_document_new (PAINT_DEFAULT_CANVAS_WIDTH,
                                                    PAINT_DEFAULT_CANVAS_HEIGHT);
   self->settings = settings;
-  rebuild_gpu_tile_grid (self);
+  invalidate_viewport_cache (self);
   update_size_request (self);
   return self;
 }
@@ -1184,9 +1276,9 @@ paint_canvas_get_document (PaintCanvas *self)
 void
 paint_canvas_set_document (PaintCanvas *self, PaintDocument *doc)
 {
+  invalidate_viewport_cache (self);
   g_clear_pointer (&self->document, paint_document_free);
   self->document = doc;
-  rebuild_gpu_tile_grid (self);
   update_size_request (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
@@ -1304,4 +1396,16 @@ paint_canvas_set_show_cursor_ring (PaintCanvas *self, gboolean show)
 {
   self->show_cursor_ring = show;
   gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
+void
+paint_canvas_check_viewport (PaintCanvas *self)
+{
+  if (!self->document || gtk_widget_get_width (GTK_WIDGET (self)) <= 0)
+    return;
+  graphene_rect_t vis = compute_visible_widget_rect (self);
+  if (vis.size.width > 0.0f && vis.size.height > 0.0f &&
+      !is_visible_covered_by_cache (self, &vis)) {
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+  }
 }
