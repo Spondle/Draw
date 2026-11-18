@@ -12,7 +12,7 @@ BuildRequires:  desktop-file-utils
 BuildRequires:  gcc
 BuildRequires:  meson
 BuildRequires:  pkgconfig(cairo)
-BuildRequires:  pkgconfig(gtk4) >= 4.16
+BuildRequires:  pkgconfig(gtk4) >= 4.12
 BuildRequires:  pkgconfig(libadwaita-1) >= 1.6
 
 Requires:       hicolor-icon-theme

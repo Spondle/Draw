@@ -5,6 +5,7 @@
 
 #define MAX_UNDO_STEPS 40
 #define UNDO_TILE_SIZE 256
+#define GPU_TILE_SIZE 512
 
 static const double ZOOM_STEPS[] = {
   0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.33, 0.5, 0.67, 0.75,
@@ -712,7 +713,7 @@ paint_document_save_to_file (PaintDocument *doc, GFile *file, GError **error)
 }
 
 /* ============================================================================
- * PaintCanvas (GPU-accelerated GtkWidget with partial-region texture updates)
+ * PaintCanvas (GPU-tiled GtkWidget with viewport culling, seamless quads)
  * ============================================================================ */
 
 enum {
@@ -728,9 +729,11 @@ struct _PaintCanvas {
 
   PaintDocument *document;
   PaintToolSettings *settings; /* unowned shared settings */
-  GdkTexture *cached_texture;
-  GBytes *surface_bytes;
-  cairo_surface_t *cached_surface;
+  GPtrArray *gpu_tiles;        /* element-type: GdkTexture* (nullable) */
+  int tile_cols;
+  int tile_rows;
+  int cached_doc_w;
+  int cached_doc_h;
 
   double zoom;
   gboolean has_hover;
@@ -745,73 +748,132 @@ struct _PaintCanvas {
 G_DEFINE_FINAL_TYPE (PaintCanvas, paint_canvas, GTK_TYPE_WIDGET)
 
 static void
-reset_gpu_texture (PaintCanvas *self)
+nullable_object_unref (gpointer ptr)
 {
-  g_clear_object (&self->cached_texture);
-  g_clear_pointer (&self->surface_bytes, g_bytes_unref);
-  self->cached_surface = NULL;
+  if (ptr)
+    g_object_unref (ptr);
+}
+
+static void
+rebuild_gpu_tile_grid (PaintCanvas *self)
+{
+  if (!self->gpu_tiles)
+    self->gpu_tiles = g_ptr_array_new_with_free_func (nullable_object_unref);
+  g_ptr_array_set_size (self->gpu_tiles, 0);
+
+  if (!self->document) {
+    self->tile_cols = 0;
+    self->tile_rows = 0;
+    self->cached_doc_w = 0;
+    self->cached_doc_h = 0;
+    return;
+  }
+
+  self->cached_doc_w = self->document->width;
+  self->cached_doc_h = self->document->height;
+  self->tile_cols = (self->cached_doc_w + GPU_TILE_SIZE - 1) / GPU_TILE_SIZE;
+  self->tile_rows = (self->cached_doc_h + GPU_TILE_SIZE - 1) / GPU_TILE_SIZE;
+  g_ptr_array_set_size (self->gpu_tiles, (guint) (self->tile_cols * self->tile_rows));
+}
+
+static void
+invalidate_all_gpu_tiles (PaintCanvas *self)
+{
+  if (!self->gpu_tiles)
+    return;
+  for (guint i = 0; i < self->gpu_tiles->len; i++) {
+    if (self->gpu_tiles->pdata[i]) {
+      g_object_unref (self->gpu_tiles->pdata[i]);
+      self->gpu_tiles->pdata[i] = NULL;
+    }
+  }
+}
+
+static void
+sync_dirty_gpu_tiles (PaintCanvas *self)
+{
+  PaintDocument *doc = self->document;
+  if (!doc)
+    return;
+
+  if (!self->gpu_tiles ||
+      self->cached_doc_w != doc->width ||
+      self->cached_doc_h != doc->height) {
+    rebuild_gpu_tile_grid (self);
+    doc->all_dirty = FALSE;
+    doc->has_dirty_rect = FALSE;
+    return;
+  }
+
+  if (doc->all_dirty) {
+    invalidate_all_gpu_tiles (self);
+    doc->all_dirty = FALSE;
+    doc->has_dirty_rect = FALSE;
+    return;
+  }
+
+  if (!doc->has_dirty_rect)
+    return;
+
+  int dx0 = doc->dirty_rect.x;
+  int dy0 = doc->dirty_rect.y;
+  int dx1 = dx0 + doc->dirty_rect.width;
+  int dy1 = dy0 + doc->dirty_rect.height;
+  doc->has_dirty_rect = FALSE;
+
+  int x0 = MAX (0, dx0);
+  int y0 = MAX (0, dy0);
+  int x1 = MIN (doc->width, dx1);
+  int y1 = MIN (doc->height, dy1);
+  if (x0 >= x1 || y0 >= y1)
+    return;
+
+  int tx0 = x0 / GPU_TILE_SIZE;
+  int ty0 = y0 / GPU_TILE_SIZE;
+  int tx1 = (x1 - 1) / GPU_TILE_SIZE;
+  int ty1 = (y1 - 1) / GPU_TILE_SIZE;
+
+  for (int ty = ty0; ty <= ty1; ty++) {
+    for (int tx = tx0; tx <= tx1; tx++) {
+      guint idx = (guint) (ty * self->tile_cols + tx);
+      if (idx < self->gpu_tiles->len && self->gpu_tiles->pdata[idx]) {
+        g_object_unref (self->gpu_tiles->pdata[idx]);
+        self->gpu_tiles->pdata[idx] = NULL;
+      }
+    }
+  }
 }
 
 static GdkTexture *
-ensure_synced_texture (PaintCanvas *self)
+ensure_gpu_tile (PaintCanvas *self, int tx, int ty)
 {
-  PaintDocument *doc = self->document;
-  if (!doc || !doc->surface)
-    return NULL;
+  guint idx = (guint) (ty * self->tile_cols + tx);
+  if (self->gpu_tiles->pdata[idx])
+    return GDK_TEXTURE (self->gpu_tiles->pdata[idx]);
 
-  cairo_surface_t *surface = doc->surface;
-  if (self->cached_surface != surface || !self->cached_texture || !self->surface_bytes) {
-    reset_gpu_texture (self);
-    cairo_surface_flush (surface);
-    int w = cairo_image_surface_get_width (surface);
-    int h = cairo_image_surface_get_height (surface);
-    int stride = cairo_image_surface_get_stride (surface);
-    unsigned char *data = cairo_image_surface_get_data (surface);
+  cairo_surface_t *surface = self->document->surface;
+  cairo_surface_flush (surface);
+  int doc_w = self->document->width;
+  int doc_h = self->document->height;
+  int stride = cairo_image_surface_get_stride (surface);
+  const unsigned char *src = cairo_image_surface_get_data (surface);
 
-    self->cached_surface = surface;
-    self->surface_bytes = g_bytes_new_with_free_func (
-        data,
-        (gsize) stride * (gsize) h,
-        (GDestroyNotify) cairo_surface_destroy,
-        cairo_surface_reference (surface));
-    self->cached_texture = gdk_memory_texture_new (
-        w, h, GDK_MEMORY_DEFAULT, self->surface_bytes, (gsize) stride);
-    doc->all_dirty = FALSE;
-    doc->has_dirty_rect = FALSE;
-    return self->cached_texture;
+  int x0 = tx * GPU_TILE_SIZE;
+  int y0 = ty * GPU_TILE_SIZE;
+  int tw = MIN (GPU_TILE_SIZE, doc_w - x0);
+  int th = MIN (GPU_TILE_SIZE, doc_h - y0);
+
+  gsize row_bytes = (gsize) tw * 4;
+  unsigned char *buf = g_malloc (row_bytes * (gsize) th);
+  for (int row = 0; row < th; row++) {
+    const unsigned char *src_row = src + (gsize) (y0 + row) * (gsize) stride + (gsize) x0 * 4;
+    memcpy (buf + (gsize) row * row_bytes, src_row, row_bytes);
   }
 
-  if (doc->all_dirty || doc->has_dirty_rect) {
-    cairo_surface_flush (surface);
-    int w = cairo_image_surface_get_width (surface);
-    int h = cairo_image_surface_get_height (surface);
-    int stride = cairo_image_surface_get_stride (surface);
-
-    cairo_rectangle_int_t rect = doc->all_dirty
-                                   ? (cairo_rectangle_int_t) { 0, 0, w, h }
-                                   : doc->dirty_rect;
-    doc->all_dirty = FALSE;
-    doc->has_dirty_rect = FALSE;
-
-    if (rect.width > 0 && rect.height > 0) {
-      cairo_region_t *region = cairo_region_create_rectangle (&rect);
-      g_autoptr (GdkMemoryTextureBuilder) builder = gdk_memory_texture_builder_new ();
-      gdk_memory_texture_builder_set_width (builder, w);
-      gdk_memory_texture_builder_set_height (builder, h);
-      gdk_memory_texture_builder_set_format (builder, GDK_MEMORY_DEFAULT);
-      gdk_memory_texture_builder_set_stride (builder, (gsize) stride);
-      gdk_memory_texture_builder_set_bytes (builder, self->surface_bytes);
-      gdk_memory_texture_builder_set_update_texture (builder, self->cached_texture);
-      gdk_memory_texture_builder_set_update_region (builder, region);
-
-      GdkTexture *updated = gdk_memory_texture_builder_build (builder);
-      g_set_object (&self->cached_texture, updated);
-      g_object_unref (updated);
-      cairo_region_destroy (region);
-    }
-  }
-
-  return self->cached_texture;
+  g_autoptr (GBytes) bytes = g_bytes_new_take (buf, row_bytes * (gsize) th);
+  GdkTexture *tex = gdk_memory_texture_new (tw, th, GDK_MEMORY_DEFAULT, bytes, row_bytes);
+  self->gpu_tiles->pdata[idx] = tex;
+  return tex;
 }
 
 static void
@@ -860,25 +922,56 @@ static void
 paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 {
   PaintCanvas *self = PAINT_CANVAS (widget);
-  GdkTexture *texture = ensure_synced_texture (self);
-  if (!texture)
+  if (!self->document)
     return;
+
+  sync_dirty_gpu_tiles (self);
 
   float draw_w = (float) gtk_widget_get_width (widget);
   float draw_h = (float) gtk_widget_get_height (widget);
   if (draw_w <= 0.0f || draw_h <= 0.0f)
     return;
 
+  graphene_rect_t vis_rect = GRAPHENE_RECT_INIT (0.0f, 0.0f, draw_w, draw_h);
+  GtkWidget *scrolled = gtk_widget_get_ancestor (widget, GTK_TYPE_SCROLLED_WINDOW);
+  if (scrolled) {
+    graphene_rect_t computed;
+    if (gtk_widget_compute_bounds (scrolled, widget, &computed))
+      graphene_rect_intersection (&vis_rect, &computed, &vis_rect);
+  }
+
   GskScalingFilter filter = GSK_SCALING_FILTER_LINEAR;
   if (self->zoom >= 2.0)
     filter = GSK_SCALING_FILTER_NEAREST;
-  else if (self->zoom < 1.0)
+  else if (self->zoom < 0.5)
     filter = GSK_SCALING_FILTER_TRILINEAR;
 
-  gtk_snapshot_append_scaled_texture (snapshot,
-                                      texture,
-                                      filter,
-                                      &GRAPHENE_RECT_INIT (0.0f, 0.0f, draw_w, draw_h));
+  int doc_w = self->document->width;
+  int doc_h = self->document->height;
+  int vx0 = MAX (0, (int) floor (vis_rect.origin.x / self->zoom) / GPU_TILE_SIZE);
+  int vy0 = MAX (0, (int) floor (vis_rect.origin.y / self->zoom) / GPU_TILE_SIZE);
+  int vx1 = MIN (self->tile_cols - 1,
+                 (int) floor ((vis_rect.origin.x + vis_rect.size.width) / self->zoom) / GPU_TILE_SIZE);
+  int vy1 = MIN (self->tile_rows - 1,
+                 (int) floor ((vis_rect.origin.y + vis_rect.size.height) / self->zoom) / GPU_TILE_SIZE);
+
+  for (int ty = vy0; ty <= vy1; ty++) {
+    int y0 = ty * GPU_TILE_SIZE;
+    int th = MIN (GPU_TILE_SIZE, doc_h - y0);
+    float qy0 = (float) (y0 * self->zoom);
+    float qy1 = (float) ((y0 + th) * self->zoom) + (ty + 1 < self->tile_rows ? 0.5f : 0.0f);
+
+    for (int tx = vx0; tx <= vx1; tx++) {
+      int x0 = tx * GPU_TILE_SIZE;
+      int tw = MIN (GPU_TILE_SIZE, doc_w - x0);
+      float qx0 = (float) (x0 * self->zoom);
+      float qx1 = (float) ((x0 + tw) * self->zoom) + (tx + 1 < self->tile_cols ? 0.5f : 0.0f);
+
+      GdkTexture *tex = ensure_gpu_tile (self, tx, ty);
+      graphene_rect_t bounds = GRAPHENE_RECT_INIT (qx0, qy0, qx1 - qx0, qy1 - qy0);
+      gtk_snapshot_append_scaled_texture (snapshot, tex, filter, &bounds);
+    }
+  }
 
   if (self->show_cursor_ring && self->has_hover && self->settings) {
     const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
@@ -998,7 +1091,8 @@ on_motion (GtkEventControllerMotion *ctrl G_GNUC_UNUSED,
   self->has_hover = TRUE;
   self->hover_x = x / self->zoom;
   self->hover_y = y / self->zoom;
-  gtk_widget_queue_draw (GTK_WIDGET (self));
+  if (self->show_cursor_ring)
+    gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
 static void
@@ -1006,14 +1100,15 @@ on_leave (GtkEventControllerMotion *ctrl G_GNUC_UNUSED, gpointer user_data)
 {
   PaintCanvas *self = PAINT_CANVAS (user_data);
   self->has_hover = FALSE;
-  gtk_widget_queue_draw (GTK_WIDGET (self));
+  if (self->show_cursor_ring)
+    gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
 static void
 paint_canvas_finalize (GObject *object)
 {
   PaintCanvas *self = PAINT_CANVAS (object);
-  reset_gpu_texture (self);
+  g_clear_pointer (&self->gpu_tiles, g_ptr_array_unref);
   g_clear_pointer (&self->document, paint_document_free);
   G_OBJECT_CLASS (paint_canvas_parent_class)->finalize (object);
 }
@@ -1045,6 +1140,7 @@ paint_canvas_init (PaintCanvas *self)
 {
   self->zoom = 1.0;
   self->show_cursor_ring = TRUE;
+  self->gpu_tiles = g_ptr_array_new_with_free_func (nullable_object_unref);
 
   gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-frame");
   gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-shadow");
@@ -1074,6 +1170,7 @@ paint_canvas_new (PaintDocument *doc, PaintToolSettings *settings)
   self->document = doc ? doc : paint_document_new (PAINT_DEFAULT_CANVAS_WIDTH,
                                                    PAINT_DEFAULT_CANVAS_HEIGHT);
   self->settings = settings;
+  rebuild_gpu_tile_grid (self);
   update_size_request (self);
   return self;
 }
@@ -1087,9 +1184,9 @@ paint_canvas_get_document (PaintCanvas *self)
 void
 paint_canvas_set_document (PaintCanvas *self, PaintDocument *doc)
 {
-  reset_gpu_texture (self);
   g_clear_pointer (&self->document, paint_document_free);
   self->document = doc;
+  rebuild_gpu_tile_grid (self);
   update_size_request (self);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
