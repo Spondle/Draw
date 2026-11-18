@@ -1,11 +1,14 @@
 #include "paint-canvas.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 #define MAX_UNDO_STEPS 40
 #define UNDO_TILE_SIZE 256
-#define VIEWPORT_OVERSCAN 192
+#define VIEWPORT_OVERSCAN 256
+#define MIN_VP_CACHE_DIM 1024
+#define MAX_OVERVIEW_DIM 2048
 
 static const double ZOOM_STEPS[] = {
   0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.33, 0.5, 0.67, 0.75,
@@ -713,7 +716,7 @@ paint_document_save_to_file (PaintDocument *doc, GFile *file, GError **error)
 }
 
 /* ============================================================================
- * PaintCanvas (Overscanned Single-Viewport-Texture GtkWidget)
+ * PaintCanvas (2-Tier Single-Texture Cache: Overview < 50% + 1:1 Viewport >= 50%)
  * ============================================================================ */
 
 enum {
@@ -730,16 +733,29 @@ struct _PaintCanvas {
   PaintDocument *document;
   PaintToolSettings *settings; /* unowned shared settings */
 
+  /* Tier 1 (>= 50% zoom): 1:1 canvas-pixel overscanned viewport texture */
   cairo_surface_t *vp_surface;
   GdkTexture *vp_texture;
-  cairo_surface_t *cached_doc_surface;
+  cairo_surface_t *vp_doc_surface;
   gboolean vp_valid;
-  gboolean vp_is_scaled;
-  double vp_zoom;
   int vp_x;
   int vp_y;
   int vp_w;
   int vp_h;
+  gboolean vp_all_dirty;
+  gboolean vp_has_dirty_rect;
+  cairo_rectangle_int_t vp_dirty_rect;
+
+  /* Tier 2 (< 50% zoom): box-downsampled <= 2048x2048 overview texture */
+  cairo_surface_t *ov_surface;
+  GdkTexture *ov_texture;
+  cairo_surface_t *ov_doc_surface;
+  int ov_div;
+  int ov_w;
+  int ov_h;
+  gboolean ov_all_dirty;
+  gboolean ov_has_dirty_rect;
+  cairo_rectangle_int_t ov_dirty_rect;
 
   double zoom;
   gboolean has_hover;
@@ -759,8 +775,95 @@ static void
 invalidate_viewport_cache (PaintCanvas *self)
 {
   self->vp_valid = FALSE;
-  self->cached_doc_surface = NULL;
+  self->vp_doc_surface = NULL;
+  self->vp_all_dirty = FALSE;
+  self->vp_has_dirty_rect = FALSE;
   g_clear_object (&self->vp_texture);
+
+  self->ov_doc_surface = NULL;
+  self->ov_all_dirty = FALSE;
+  self->ov_has_dirty_rect = FALSE;
+  g_clear_object (&self->ov_texture);
+}
+
+static void
+expand_dirty_rect (gboolean *all_dirty,
+                   gboolean *has_rect,
+                   cairo_rectangle_int_t *accum,
+                   const cairo_rectangle_int_t *r)
+{
+  if (*all_dirty)
+    return;
+  if (!*has_rect) {
+    *accum = *r;
+    *has_rect = TRUE;
+  } else {
+    int x0 = MIN (accum->x, r->x);
+    int y0 = MIN (accum->y, r->y);
+    int x1 = MAX (accum->x + accum->width, r->x + r->width);
+    int y1 = MAX (accum->y + accum->height, r->y + r->height);
+    *accum = (cairo_rectangle_int_t) { x0, y0, x1 - x0, y1 - y0 };
+  }
+}
+
+static void
+propagate_document_dirty (PaintCanvas *self)
+{
+  PaintDocument *doc = self->document;
+  if (!doc)
+    return;
+
+  if (doc->all_dirty) {
+    self->vp_all_dirty = TRUE;
+    self->vp_has_dirty_rect = FALSE;
+    self->ov_all_dirty = TRUE;
+    self->ov_has_dirty_rect = FALSE;
+    doc->all_dirty = FALSE;
+    doc->has_dirty_rect = FALSE;
+  } else if (doc->has_dirty_rect) {
+    expand_dirty_rect (&self->vp_all_dirty, &self->vp_has_dirty_rect,
+                       &self->vp_dirty_rect, &doc->dirty_rect);
+    expand_dirty_rect (&self->ov_all_dirty, &self->ov_has_dirty_rect,
+                       &self->ov_dirty_rect, &doc->dirty_rect);
+    doc->has_dirty_rect = FALSE;
+  }
+}
+
+static GdkTexture *
+upload_surface_texture (cairo_surface_t *surface,
+                        GdkTexture *old_texture,
+                        int w,
+                        int h,
+                        const cairo_rectangle_int_t *update_rect)
+{
+  cairo_surface_flush (surface);
+  int stride = cairo_image_surface_get_stride (surface);
+  const unsigned char *data = cairo_image_surface_get_data (surface);
+  g_autoptr (GBytes) bytes = g_bytes_new (data, (gsize) stride * (gsize) h);
+
+#if GTK_CHECK_VERSION (4, 16, 0)
+  if (update_rect && old_texture &&
+      update_rect->width > 0 && update_rect->height > 0) {
+    cairo_region_t *region = cairo_region_create_rectangle (update_rect);
+    g_autoptr (GdkMemoryTextureBuilder) builder = gdk_memory_texture_builder_new ();
+    gdk_memory_texture_builder_set_width (builder, w);
+    gdk_memory_texture_builder_set_height (builder, h);
+    gdk_memory_texture_builder_set_format (builder, GDK_MEMORY_DEFAULT);
+    gdk_memory_texture_builder_set_stride (builder, (gsize) stride);
+    gdk_memory_texture_builder_set_bytes (builder, bytes);
+    gdk_memory_texture_builder_set_update_texture (builder, old_texture);
+    gdk_memory_texture_builder_set_update_region (builder, region);
+
+    GdkTexture *updated = gdk_memory_texture_builder_build (builder);
+    cairo_region_destroy (region);
+    return updated;
+  }
+#else
+  (void) update_rect;
+  (void) old_texture;
+#endif
+
+  return gdk_memory_texture_new (w, h, GDK_MEMORY_DEFAULT, bytes, (gsize) stride);
 }
 
 static graphene_rect_t
@@ -782,33 +885,19 @@ compute_visible_widget_rect (PaintCanvas *self)
 }
 
 static gboolean
-is_visible_covered_by_cache (PaintCanvas *self, const graphene_rect_t *vis)
+is_visible_covered_by_vp_cache (PaintCanvas *self, const graphene_rect_t *vis)
 {
   if (!self->vp_valid || !self->vp_texture || !self->vp_surface ||
-      !self->document || self->cached_doc_surface != self->document->surface) {
+      !self->document || self->vp_doc_surface != self->document->surface) {
     return FALSE;
   }
 
-  gboolean want_scaled = (self->zoom < 1.0);
-  if (self->vp_is_scaled != want_scaled)
-    return FALSE;
-  if (want_scaled && fabs (self->vp_zoom - self->zoom) > 1e-4)
-    return FALSE;
-
-  int req_x0, req_y0, req_x1, req_y1;
-  if (want_scaled) {
-    int draw_w = MAX (1, (int) lround (self->document->width * self->zoom));
-    int draw_h = MAX (1, (int) lround (self->document->height * self->zoom));
-    req_x0 = MAX (0, (int) floor (vis->origin.x));
-    req_y0 = MAX (0, (int) floor (vis->origin.y));
-    req_x1 = MIN (draw_w, (int) ceil (vis->origin.x + vis->size.width));
-    req_y1 = MIN (draw_h, (int) ceil (vis->origin.y + vis->size.height));
-  } else {
-    req_x0 = MAX (0, (int) floor (vis->origin.x / self->zoom));
-    req_y0 = MAX (0, (int) floor (vis->origin.y / self->zoom));
-    req_x1 = MIN (self->document->width, (int) ceil ((vis->origin.x + vis->size.width) / self->zoom));
-    req_y1 = MIN (self->document->height, (int) ceil ((vis->origin.y + vis->size.height) / self->zoom));
-  }
+  int req_x0 = MAX (0, (int) floor (vis->origin.x / self->zoom));
+  int req_y0 = MAX (0, (int) floor (vis->origin.y / self->zoom));
+  int req_x1 = MIN (self->document->width,
+                    (int) ceil ((vis->origin.x + vis->size.width) / self->zoom));
+  int req_y1 = MIN (self->document->height,
+                    (int) ceil ((vis->origin.y + vis->size.height) / self->zoom));
 
   return req_x0 >= self->vp_x &&
          req_y0 >= self->vp_y &&
@@ -817,99 +906,52 @@ is_visible_covered_by_cache (PaintCanvas *self, const graphene_rect_t *vis)
 }
 
 static void
-upload_viewport_texture (PaintCanvas *self, const cairo_rectangle_int_t *update_rect)
+copy_doc_rect_to_vp (PaintCanvas *self, int vx0, int vy0, int vw, int vh)
 {
-  cairo_surface_flush (self->vp_surface);
-  int stride = cairo_image_surface_get_stride (self->vp_surface);
-  const unsigned char *data = cairo_image_surface_get_data (self->vp_surface);
-  g_autoptr (GBytes) bytes = g_bytes_new (data, (gsize) stride * (gsize) self->vp_h);
+  cairo_surface_t *src_surf = self->document->surface;
+  cairo_surface_flush (src_surf);
+  int src_stride = cairo_image_surface_get_stride (src_surf);
+  const unsigned char *src = cairo_image_surface_get_data (src_surf);
+  int dst_stride = cairo_image_surface_get_stride (self->vp_surface);
+  unsigned char *dst = cairo_image_surface_get_data (self->vp_surface);
 
-#if GTK_CHECK_VERSION (4, 16, 0)
-  if (update_rect && self->vp_texture &&
-      update_rect->width > 0 && update_rect->height > 0) {
-    cairo_region_t *region = cairo_region_create_rectangle (update_rect);
-    g_autoptr (GdkMemoryTextureBuilder) builder = gdk_memory_texture_builder_new ();
-    gdk_memory_texture_builder_set_width (builder, self->vp_w);
-    gdk_memory_texture_builder_set_height (builder, self->vp_h);
-    gdk_memory_texture_builder_set_format (builder, GDK_MEMORY_DEFAULT);
-    gdk_memory_texture_builder_set_stride (builder, (gsize) stride);
-    gdk_memory_texture_builder_set_bytes (builder, bytes);
-    gdk_memory_texture_builder_set_update_texture (builder, self->vp_texture);
-    gdk_memory_texture_builder_set_update_region (builder, region);
-
-    GdkTexture *updated = gdk_memory_texture_builder_build (builder);
-    g_set_object (&self->vp_texture, updated);
-    g_object_unref (updated);
-    cairo_region_destroy (region);
-    return;
+  int sx0 = self->vp_x + vx0;
+  int sy0 = self->vp_y + vy0;
+  gsize row_bytes = (gsize) vw * 4;
+  for (int row = 0; row < vh; row++) {
+    const unsigned char *srow = src + (gsize) (sy0 + row) * (gsize) src_stride + (gsize) sx0 * 4;
+    unsigned char *drow = dst + (gsize) (vy0 + row) * (gsize) dst_stride + (gsize) vx0 * 4;
+    memcpy (drow, srow, row_bytes);
   }
-#else
-  (void) update_rect;
-#endif
-
-  g_clear_object (&self->vp_texture);
-  self->vp_texture = gdk_memory_texture_new (
-      self->vp_w, self->vp_h, GDK_MEMORY_DEFAULT, bytes, (gsize) stride);
+  cairo_surface_mark_dirty_rectangle (self->vp_surface, vx0, vy0, vw, vh);
 }
 
 static void
-render_doc_rect_to_viewport (PaintCanvas *self, int vx0, int vy0, int vw, int vh)
+rebuild_vp_cache (PaintCanvas *self, const graphene_rect_t *vis)
 {
   PaintDocument *doc = self->document;
-  if (!self->vp_is_scaled) {
-    cairo_surface_flush (doc->surface);
-    int src_stride = cairo_image_surface_get_stride (doc->surface);
-    const unsigned char *src = cairo_image_surface_get_data (doc->surface);
-    int dst_stride = cairo_image_surface_get_stride (self->vp_surface);
-    unsigned char *dst = cairo_image_surface_get_data (self->vp_surface);
+  int pad = CLAMP ((int) ceil ((double) VIEWPORT_OVERSCAN / self->zoom), 64, 256);
+  int req_x0 = MAX (0, (int) floor (vis->origin.x / self->zoom) - pad);
+  int req_y0 = MAX (0, (int) floor (vis->origin.y / self->zoom) - pad);
+  int req_x1 = MIN (doc->width, (int) ceil ((vis->origin.x + vis->size.width) / self->zoom) + pad);
+  int req_y1 = MIN (doc->height, (int) ceil ((vis->origin.y + vis->size.height) / self->zoom) + pad);
 
-    int sx0 = self->vp_x + vx0;
-    int sy0 = self->vp_y + vy0;
-    gsize row_bytes = (gsize) vw * 4;
-    for (int row = 0; row < vh; row++) {
-      const unsigned char *srow = src + (gsize) (sy0 + row) * (gsize) src_stride + (gsize) sx0 * 4;
-      unsigned char *drow = dst + (gsize) (vy0 + row) * (gsize) dst_stride + (gsize) vx0 * 4;
-      memcpy (drow, srow, row_bytes);
-    }
-    cairo_surface_mark_dirty_rectangle (self->vp_surface, vx0, vy0, vw, vh);
-  } else {
-    cairo_t *cr = cairo_create (self->vp_surface);
-    cairo_rectangle (cr, vx0, vy0, vw, vh);
-    cairo_clip (cr);
-    cairo_set_operator (cr, CAIRO_OPERATOR_SOURCE);
-    cairo_translate (cr, -self->vp_x, -self->vp_y);
-    cairo_scale (cr, self->vp_zoom, self->vp_zoom);
-    cairo_set_source_surface (cr, doc->surface, 0, 0);
-    cairo_pattern_set_filter (cairo_get_source (cr), CAIRO_FILTER_GOOD);
-    cairo_paint (cr);
-    cairo_destroy (cr);
+  /* Ensure a minimum cache span so zooming 100% <-> 3200% doesn't re-copy */
+  int min_w = MIN (doc->width, MIN_VP_CACHE_DIM);
+  int min_h = MIN (doc->height, MIN_VP_CACHE_DIM);
+  if (req_x1 - req_x0 < min_w) {
+    int cx = (req_x0 + req_x1) / 2;
+    req_x0 = CLAMP (cx - min_w / 2, 0, doc->width - min_w);
+    req_x1 = req_x0 + min_w;
   }
-}
-
-static void
-rebuild_viewport_cache (PaintCanvas *self, const graphene_rect_t *vis)
-{
-  PaintDocument *doc = self->document;
-  gboolean scaled = (self->zoom < 1.0);
-  int cx0, cy0, cx1, cy1;
-
-  if (scaled) {
-    int draw_w = MAX (1, (int) lround (doc->width * self->zoom));
-    int draw_h = MAX (1, (int) lround (doc->height * self->zoom));
-    cx0 = MAX (0, (int) floor (vis->origin.x) - VIEWPORT_OVERSCAN);
-    cy0 = MAX (0, (int) floor (vis->origin.y) - VIEWPORT_OVERSCAN);
-    cx1 = MIN (draw_w, (int) ceil (vis->origin.x + vis->size.width) + VIEWPORT_OVERSCAN);
-    cy1 = MIN (draw_h, (int) ceil (vis->origin.y + vis->size.height) + VIEWPORT_OVERSCAN);
-  } else {
-    int pad = MAX (32, (int) ceil ((double) VIEWPORT_OVERSCAN / self->zoom));
-    cx0 = MAX (0, (int) floor (vis->origin.x / self->zoom) - pad);
-    cy0 = MAX (0, (int) floor (vis->origin.y / self->zoom) - pad);
-    cx1 = MIN (doc->width, (int) ceil ((vis->origin.x + vis->size.width) / self->zoom) + pad);
-    cy1 = MIN (doc->height, (int) ceil ((vis->origin.y + vis->size.height) / self->zoom) + pad);
+  if (req_y1 - req_y0 < min_h) {
+    int cy = (req_y0 + req_y1) / 2;
+    req_y0 = CLAMP (cy - min_h / 2, 0, doc->height - min_h);
+    req_y1 = req_y0 + min_h;
   }
 
-  int cw = MAX (1, cx1 - cx0);
-  int ch = MAX (1, cy1 - cy0);
+  int cw = MAX (1, req_x1 - req_x0);
+  int ch = MAX (1, req_y1 - req_y0);
 
   if (!self->vp_surface ||
       cairo_image_surface_get_width (self->vp_surface) != cw ||
@@ -919,67 +961,249 @@ rebuild_viewport_cache (PaintCanvas *self, const graphene_rect_t *vis)
     g_clear_object (&self->vp_texture);
   }
 
-  self->vp_is_scaled = scaled;
-  self->vp_zoom = self->zoom;
-  self->vp_x = cx0;
-  self->vp_y = cy0;
+  self->vp_x = req_x0;
+  self->vp_y = req_y0;
   self->vp_w = cw;
   self->vp_h = ch;
-  self->cached_doc_surface = doc->surface;
+  self->vp_doc_surface = doc->surface;
   self->vp_valid = TRUE;
+  self->vp_all_dirty = FALSE;
+  self->vp_has_dirty_rect = FALSE;
 
-  render_doc_rect_to_viewport (self, 0, 0, cw, ch);
-  upload_viewport_texture (self, NULL);
-
-  doc->all_dirty = FALSE;
-  doc->has_dirty_rect = FALSE;
+  copy_doc_rect_to_vp (self, 0, 0, cw, ch);
+  GdkTexture *tex = upload_surface_texture (self->vp_surface, NULL, cw, ch, NULL);
+  g_clear_object (&self->vp_texture);
+  self->vp_texture = tex;
 }
 
 static GdkTexture *
-ensure_viewport_texture (PaintCanvas *self, const graphene_rect_t *vis)
+ensure_vp_texture (PaintCanvas *self, const graphene_rect_t *vis)
+{
+  if (!is_visible_covered_by_vp_cache (self, vis)) {
+    rebuild_vp_cache (self, vis);
+    return self->vp_texture;
+  }
+
+  if (self->vp_all_dirty) {
+    self->vp_all_dirty = FALSE;
+    self->vp_has_dirty_rect = FALSE;
+    copy_doc_rect_to_vp (self, 0, 0, self->vp_w, self->vp_h);
+    GdkTexture *tex = upload_surface_texture (
+        self->vp_surface, NULL, self->vp_w, self->vp_h, NULL);
+    g_clear_object (&self->vp_texture);
+    self->vp_texture = tex;
+    return self->vp_texture;
+  }
+
+  if (self->vp_has_dirty_rect) {
+    cairo_rectangle_int_t d = self->vp_dirty_rect;
+    self->vp_has_dirty_rect = FALSE;
+
+    int vx0 = MAX (0, d.x - self->vp_x);
+    int vy0 = MAX (0, d.y - self->vp_y);
+    int vx1 = MIN (self->vp_w, (d.x + d.width) - self->vp_x);
+    int vy1 = MIN (self->vp_h, (d.y + d.height) - self->vp_y);
+
+    if (vx0 < vx1 && vy0 < vy1) {
+      cairo_rectangle_int_t upd = { vx0, vy0, vx1 - vx0, vy1 - vy0 };
+      copy_doc_rect_to_vp (self, upd.x, upd.y, upd.width, upd.height);
+      GdkTexture *next = upload_surface_texture (
+          self->vp_surface, self->vp_texture, self->vp_w, self->vp_h, &upd);
+      g_set_object (&self->vp_texture, next);
+      g_object_unref (next);
+    }
+  }
+
+  return self->vp_texture;
+}
+
+static uint32_t
+downsample_clamped_pixel (const uint32_t *src_px,
+                          int src_stride_px,
+                          int sx0,
+                          int sx1,
+                          int sy0,
+                          int sy1)
+{
+  uint32_t sum_a = 0, sum_r = 0, sum_g = 0, sum_b = 0;
+  uint32_t count = 0;
+  for (int sy = sy0; sy < sy1; sy++) {
+    const uint32_t *srow = src_px + (gsize) sy * (gsize) src_stride_px;
+    for (int sx = sx0; sx < sx1; sx++) {
+      uint32_t px = srow[sx];
+      sum_a += (px >> 24) & 0xFFU;
+      sum_r += (px >> 16) & 0xFFU;
+      sum_g += (px >> 8) & 0xFFU;
+      sum_b += px & 0xFFU;
+      count++;
+    }
+  }
+  if (count == 0)
+    return 0;
+  uint32_t half = count >> 1;
+  return (((sum_a + half) / count) << 24) |
+         (((sum_r + half) / count) << 16) |
+         (((sum_g + half) / count) << 8) |
+         ((sum_b + half) / count);
+}
+
+static void
+box_downsample_rect (cairo_surface_t *src_surf,
+                     cairo_surface_t *dst_surf,
+                     int div,
+                     int dx0,
+                     int dy0,
+                     int dw,
+                     int dh)
+{
+  cairo_surface_flush (src_surf);
+  int src_w = cairo_image_surface_get_width (src_surf);
+  int src_h = cairo_image_surface_get_height (src_surf);
+  int src_stride = cairo_image_surface_get_stride (src_surf);
+  const unsigned char *src_data = cairo_image_surface_get_data (src_surf);
+
+  int dst_stride = cairo_image_surface_get_stride (dst_surf);
+  unsigned char *dst_data = cairo_image_surface_get_data (dst_surf);
+
+  if (div == 1) {
+    gsize row_bytes = (gsize) dw * 4;
+    for (int row = 0; row < dh; row++) {
+      int sy = dy0 + row;
+      const unsigned char *srow = src_data + (gsize) sy * (gsize) src_stride + (gsize) dx0 * 4;
+      unsigned char *drow = dst_data + (gsize) sy * (gsize) dst_stride + (gsize) dx0 * 4;
+      memcpy (drow, srow, row_bytes);
+    }
+    cairo_surface_mark_dirty_rectangle (dst_surf, dx0, dy0, dw, dh);
+    return;
+  }
+
+  const uint32_t *src_px = (const uint32_t *) src_data;
+  uint32_t *dst_px = (uint32_t *) dst_data;
+  int src_stride_px = src_stride / 4;
+  int dst_stride_px = dst_stride / 4;
+
+  /* Safe for 16-bit lane SWAR accumulation up to div=8 (max 64 * 255 = 16320 < 65535) */
+  int shift = (div == 2) ? 2 : (div == 4) ? 4 : (div == 8) ? 6 : 0;
+  int full_x_end = src_w / div;
+  int full_y_end = src_h / div;
+
+  for (int dy = dy0; dy < dy0 + dh; dy++) {
+    int sy0 = dy * div;
+    int sy1 = MIN (src_h, sy0 + div);
+    uint32_t *drow = dst_px + (gsize) dy * (gsize) dst_stride_px;
+    gboolean full_y = (shift > 0) && (dy < full_y_end);
+    int dx = dx0;
+    int fast_end = full_y ? MIN (dx0 + dw, full_x_end) : dx0;
+
+    if (div == 4 && full_y) {
+      const uint32_t *r0 = src_px + (gsize) sy0 * (gsize) src_stride_px;
+      const uint32_t *r1 = r0 + src_stride_px;
+      const uint32_t *r2 = r1 + src_stride_px;
+      const uint32_t *r3 = r2 + src_stride_px;
+      for (; dx < fast_end; dx++) {
+        int sx0 = dx * 4;
+        uint32_t rb = 0x00080008U;
+        uint32_t ag = 0x00080008U;
+        for (int k = 0; k < 4; k++) {
+          uint32_t p0 = r0[sx0 + k], p1 = r1[sx0 + k], p2 = r2[sx0 + k], p3 = r3[sx0 + k];
+          rb += (p0 & 0x00FF00FFU) + (p1 & 0x00FF00FFU) + (p2 & 0x00FF00FFU) + (p3 & 0x00FF00FFU);
+          ag += ((p0 >> 8) & 0x00FF00FFU) + ((p1 >> 8) & 0x00FF00FFU) +
+                ((p2 >> 8) & 0x00FF00FFU) + ((p3 >> 8) & 0x00FF00FFU);
+        }
+        drow[dx] = ((rb >> 4) & 0x00FF00FFU) | (((ag >> 4) & 0x00FF00FFU) << 8);
+      }
+    } else if (shift > 0 && full_y) {
+      uint32_t bias = 0x00010001U * (1U << (shift - 1));
+      for (; dx < fast_end; dx++) {
+        int sx0 = dx * div;
+        uint32_t rb = bias;
+        uint32_t ag = bias;
+        const uint32_t *row = src_px + (gsize) sy0 * (gsize) src_stride_px + sx0;
+        for (int ky = 0; ky < div; ky++, row += src_stride_px) {
+          for (int kx = 0; kx < div; kx++) {
+            uint32_t p = row[kx];
+            rb += p & 0x00FF00FFU;
+            ag += (p >> 8) & 0x00FF00FFU;
+          }
+        }
+        drow[dx] = ((rb >> shift) & 0x00FF00FFU) | (((ag >> shift) & 0x00FF00FFU) << 8);
+      }
+    }
+
+    for (; dx < dx0 + dw; dx++) {
+      int sx0 = dx * div;
+      int sx1 = MIN (src_w, sx0 + div);
+      drow[dx] = downsample_clamped_pixel (src_px, src_stride_px, sx0, sx1, sy0, sy1);
+    }
+  }
+  cairo_surface_mark_dirty_rectangle (dst_surf, dx0, dy0, dw, dh);
+}
+
+static GdkTexture *
+ensure_overview_texture (PaintCanvas *self)
 {
   PaintDocument *doc = self->document;
   if (!doc || !doc->surface)
     return NULL;
 
-  if (!is_visible_covered_by_cache (self, vis)) {
-    rebuild_viewport_cache (self, vis);
-    return self->vp_texture;
-  }
+  int max_dim = MAX (doc->width, doc->height);
+  int div = 1;
+  while (max_dim / div > MAX_OVERVIEW_DIM)
+    div *= 2;
+  int ow = MAX (1, (doc->width + div - 1) / div);
+  int oh = MAX (1, (doc->height + div - 1) / div);
 
-  if (doc->all_dirty) {
-    doc->all_dirty = FALSE;
-    doc->has_dirty_rect = FALSE;
-    render_doc_rect_to_viewport (self, 0, 0, self->vp_w, self->vp_h);
-    upload_viewport_texture (self, NULL);
-    return self->vp_texture;
-  }
-
-  if (doc->has_dirty_rect) {
-    cairo_rectangle_int_t d = doc->dirty_rect;
-    doc->has_dirty_rect = FALSE;
-
-    int vx0, vy0, vx1, vy1;
-    if (!self->vp_is_scaled) {
-      vx0 = MAX (0, d.x - self->vp_x);
-      vy0 = MAX (0, d.y - self->vp_y);
-      vx1 = MIN (self->vp_w, (d.x + d.width) - self->vp_x);
-      vy1 = MIN (self->vp_h, (d.y + d.height) - self->vp_y);
-    } else {
-      vx0 = MAX (0, (int) floor (d.x * self->vp_zoom) - 2 - self->vp_x);
-      vy0 = MAX (0, (int) floor (d.y * self->vp_zoom) - 2 - self->vp_y);
-      vx1 = MIN (self->vp_w, (int) ceil ((d.x + d.width) * self->vp_zoom) + 2 - self->vp_x);
-      vy1 = MIN (self->vp_h, (int) ceil ((d.y + d.height) * self->vp_zoom) + 2 - self->vp_y);
+  if (!self->ov_texture || !self->ov_surface ||
+      self->ov_doc_surface != doc->surface ||
+      self->ov_div != div || self->ov_w != ow || self->ov_h != oh) {
+    if (!self->ov_surface ||
+        cairo_image_surface_get_width (self->ov_surface) != ow ||
+        cairo_image_surface_get_height (self->ov_surface) != oh) {
+      g_clear_pointer (&self->ov_surface, cairo_surface_destroy);
+      self->ov_surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, ow, oh);
     }
+    self->ov_div = div;
+    self->ov_w = ow;
+    self->ov_h = oh;
+    self->ov_doc_surface = doc->surface;
+    self->ov_all_dirty = FALSE;
+    self->ov_has_dirty_rect = FALSE;
 
-    if (vx0 < vx1 && vy0 < vy1) {
-      cairo_rectangle_int_t upd = { vx0, vy0, vx1 - vx0, vy1 - vy0 };
-      render_doc_rect_to_viewport (self, upd.x, upd.y, upd.width, upd.height);
-      upload_viewport_texture (self, &upd);
-    }
+    box_downsample_rect (doc->surface, self->ov_surface, div, 0, 0, ow, oh);
+    GdkTexture *tex = upload_surface_texture (self->ov_surface, NULL, ow, oh, NULL);
+    g_clear_object (&self->ov_texture);
+    self->ov_texture = tex;
+    return self->ov_texture;
   }
 
-  return self->vp_texture;
+  if (self->ov_all_dirty) {
+    self->ov_all_dirty = FALSE;
+    self->ov_has_dirty_rect = FALSE;
+    box_downsample_rect (doc->surface, self->ov_surface, div, 0, 0, ow, oh);
+    GdkTexture *tex = upload_surface_texture (self->ov_surface, NULL, ow, oh, NULL);
+    g_clear_object (&self->ov_texture);
+    self->ov_texture = tex;
+    return self->ov_texture;
+  }
+
+  if (self->ov_has_dirty_rect) {
+    cairo_rectangle_int_t d = self->ov_dirty_rect;
+    self->ov_has_dirty_rect = FALSE;
+
+    int dx0 = CLAMP (d.x / div, 0, ow - 1);
+    int dy0 = CLAMP (d.y / div, 0, oh - 1);
+    int dx1 = CLAMP ((d.x + d.width + div - 1) / div, dx0 + 1, ow);
+    int dy1 = CLAMP ((d.y + d.height + div - 1) / div, dy0 + 1, oh);
+
+    cairo_rectangle_int_t upd = { dx0, dy0, dx1 - dx0, dy1 - dy0 };
+    box_downsample_rect (doc->surface, self->ov_surface, div, upd.x, upd.y, upd.width, upd.height);
+    GdkTexture *next = upload_surface_texture (
+        self->ov_surface, self->ov_texture, ow, oh, &upd);
+    g_set_object (&self->ov_texture, next);
+    g_object_unref (next);
+  }
+
+  return self->ov_texture;
 }
 
 static void
@@ -995,8 +1219,6 @@ update_size_request (PaintCanvas *self)
     gtk_widget_remove_css_class (GTK_WIDGET (self), "paint-canvas-shadow");
   else
     gtk_widget_add_css_class (GTK_WIDGET (self), "paint-canvas-shadow");
-
-  gtk_widget_queue_resize (GTK_WIDGET (self));
 }
 
 static void
@@ -1031,32 +1253,43 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
   if (!self->document)
     return;
 
-  graphene_rect_t vis_rect = compute_visible_widget_rect (self);
-  if (vis_rect.size.width <= 0.0f || vis_rect.size.height <= 0.0f)
-    return;
+  propagate_document_dirty (self);
 
-  GdkTexture *tex = ensure_viewport_texture (self, &vis_rect);
-  if (!tex)
-    return;
-
-  graphene_rect_t bounds;
-  GskScalingFilter filter;
-  if (self->vp_is_scaled) {
-    bounds = GRAPHENE_RECT_INIT ((float) self->vp_x,
-                                 (float) self->vp_y,
-                                 (float) self->vp_w,
-                                 (float) self->vp_h);
-    filter = GSK_SCALING_FILTER_LINEAR;
+  if (self->zoom < 0.50) {
+    GdkTexture *tex = ensure_overview_texture (self);
+    if (!tex)
+      return;
+    float bw = (float) (self->ov_w * self->ov_div * self->zoom);
+    float bh = (float) (self->ov_h * self->ov_div * self->zoom);
+    if (bw <= 0.0f || bh <= 0.0f)
+      return;
+    GskScalingFilter filter = (!self->drawing_active && self->zoom * self->ov_div < 0.5)
+                                ? GSK_SCALING_FILTER_TRILINEAR
+                                : GSK_SCALING_FILTER_LINEAR;
+    gtk_snapshot_append_scaled_texture (snapshot,
+                                        tex,
+                                        filter,
+                                        &GRAPHENE_RECT_INIT (0.0f, 0.0f, bw, bh));
   } else {
+    graphene_rect_t vis_rect = compute_visible_widget_rect (self);
+    if (vis_rect.size.width <= 0.0f || vis_rect.size.height <= 0.0f)
+      return;
+    GdkTexture *tex = ensure_vp_texture (self, &vis_rect);
+    if (!tex)
+      return;
+
     float x0 = (float) (self->vp_x * self->zoom);
     float y0 = (float) (self->vp_y * self->zoom);
     float x1 = (float) ((self->vp_x + self->vp_w) * self->zoom);
     float y1 = (float) ((self->vp_y + self->vp_h) * self->zoom);
-    bounds = GRAPHENE_RECT_INIT (x0, y0, x1 - x0, y1 - y0);
-    filter = (self->zoom >= 2.0) ? GSK_SCALING_FILTER_NEAREST : GSK_SCALING_FILTER_LINEAR;
+    GskScalingFilter filter = (self->zoom >= 2.0)
+                                ? GSK_SCALING_FILTER_NEAREST
+                                : GSK_SCALING_FILTER_LINEAR;
+    gtk_snapshot_append_scaled_texture (snapshot,
+                                        tex,
+                                        filter,
+                                        &GRAPHENE_RECT_INIT (x0, y0, x1 - x0, y1 - y0));
   }
-
-  gtk_snapshot_append_scaled_texture (snapshot, tex, filter, &bounds);
 
   if (self->show_cursor_ring && self->has_hover && self->settings) {
     const PaintTool *active_tool = paint_tools_find (self->settings->active_tool_id);
@@ -1202,6 +1435,7 @@ paint_canvas_finalize (GObject *object)
   PaintCanvas *self = PAINT_CANVAS (object);
   invalidate_viewport_cache (self);
   g_clear_pointer (&self->vp_surface, cairo_surface_destroy);
+  g_clear_pointer (&self->ov_surface, cairo_surface_destroy);
   g_clear_pointer (&self->document, paint_document_free);
   G_OBJECT_CLASS (paint_canvas_parent_class)->finalize (object);
 }
@@ -1403,9 +1637,13 @@ paint_canvas_check_viewport (PaintCanvas *self)
 {
   if (!self->document || gtk_widget_get_width (GTK_WIDGET (self)) <= 0)
     return;
+  if (self->zoom < 0.50 && self->ov_texture &&
+      self->ov_doc_surface == self->document->surface) {
+    return;
+  }
   graphene_rect_t vis = compute_visible_widget_rect (self);
   if (vis.size.width > 0.0f && vis.size.height > 0.0f &&
-      !is_visible_covered_by_cache (self, &vis)) {
+      !is_visible_covered_by_vp_cache (self, &vis)) {
     gtk_widget_queue_draw (GTK_WIDGET (self));
   }
 }
