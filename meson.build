@@ -8,7 +8,7 @@ project('paint', 'c',
 
 gnome = import('gnome')
 
-gtk4_dep = dependency('gtk4', version: '>= 4.12')
+gtk4_dep = dependency('gtk4', version: '>= 4.16')
 adw_dep = dependency('libadwaita-1', version: '>= 1.6')
 cairo_dep = dependency('cairo')
 math_dep = meson.get_compiler('c').find_library('m', required: false)
