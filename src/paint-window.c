@@ -421,6 +421,7 @@ create_single_save_changes_dialog (PaintDocument *doc)
                                             ADW_RESPONSE_SUGGESTED);
   adw_alert_dialog_set_default_response (ADW_ALERT_DIALOG (dlg), "save");
   adw_alert_dialog_set_close_response (ADW_ALERT_DIALOG (dlg), "cancel");
+  adw_alert_dialog_set_prefer_wide_layout (ADW_ALERT_DIALOG (dlg), TRUE);
   return dlg;
 }
 
@@ -862,6 +863,7 @@ on_window_close_request (GtkWindow *window, gpointer user_data G_GNUC_UNUSED)
                                               ADW_RESPONSE_SUGGESTED);
     adw_alert_dialog_set_default_response (ADW_ALERT_DIALOG (dlg), "save");
     adw_alert_dialog_set_close_response (ADW_ALERT_DIALOG (dlg), "cancel");
+    adw_alert_dialog_set_prefer_wide_layout (ADW_ALERT_DIALOG (dlg), TRUE);
 
     GtkWidget *list = gtk_list_box_new ();
     gtk_list_box_set_selection_mode (GTK_LIST_BOX (list), GTK_SELECTION_NONE);
