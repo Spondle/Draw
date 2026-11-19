@@ -25,6 +25,7 @@ struct _PaintTool {
   const char *id;
   const char *name;
   const char *icon_name;
+  const char *filled_icon_name;
   const char *tooltip;
   gboolean uses_brush_size;
   gboolean is_shape;
@@ -73,5 +74,7 @@ void paint_tool_settings_free (PaintToolSettings *settings);
 
 const PaintTool *paint_tools_get_all (gsize *n_tools);
 const PaintTool *paint_tools_find (const char *tool_id);
+const char *paint_tool_get_icon_name (const PaintTool *tool,
+                                      const PaintToolSettings *settings);
 
 G_END_DECLS

@@ -905,6 +905,7 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .id = "shape-rectangle",
     .name = "Rectangle",
     .icon_name = "tool-shape-rect-symbolic",
+    .filled_icon_name = "tool-shape-rect-filled-symbolic",
     .tooltip = "Rectangle · Hold Shift for square",
     .uses_brush_size = TRUE,
     .is_shape = TRUE,
@@ -919,6 +920,7 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .id = "shape-rounded-rect",
     .name = "Rounded",
     .icon_name = "tool-shape-rounded-rect-symbolic",
+    .filled_icon_name = "tool-shape-rounded-rect-filled-symbolic",
     .tooltip = "Rounded Rectangle · Hold Shift for square",
     .uses_brush_size = TRUE,
     .is_shape = TRUE,
@@ -933,6 +935,7 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .id = "shape-ellipse",
     .name = "Circle",
     .icon_name = "tool-shape-ellipse-symbolic",
+    .filled_icon_name = "tool-shape-ellipse-filled-symbolic",
     .tooltip = "Ellipse / Circle · Hold Shift for circle",
     .uses_brush_size = TRUE,
     .is_shape = TRUE,
@@ -947,6 +950,7 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .id = "shape-triangle",
     .name = "Triangle",
     .icon_name = "tool-shape-triangle-symbolic",
+    .filled_icon_name = "tool-shape-triangle-filled-symbolic",
     .tooltip = "Triangle · Hold Shift for 1:1 proportions",
     .uses_brush_size = TRUE,
     .is_shape = TRUE,
@@ -961,6 +965,7 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .id = "shape-diamond",
     .name = "Diamond",
     .icon_name = "tool-shape-diamond-symbolic",
+    .filled_icon_name = "tool-shape-diamond-filled-symbolic",
     .tooltip = "Diamond · Hold Shift for 1:1 proportions",
     .uses_brush_size = TRUE,
     .is_shape = TRUE,
@@ -975,6 +980,7 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .id = "shape-hexagon",
     .name = "Hexagon",
     .icon_name = "tool-shape-hexagon-symbolic",
+    .filled_icon_name = "tool-shape-hexagon-filled-symbolic",
     .tooltip = "Hexagon · Hold Shift for regular hexagon",
     .uses_brush_size = TRUE,
     .is_shape = TRUE,
@@ -989,6 +995,7 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .id = "shape-star",
     .name = "Star",
     .icon_name = "tool-shape-star-symbolic",
+    .filled_icon_name = "tool-shape-star-filled-symbolic",
     .tooltip = "Star · Hold Shift for symmetric star",
     .uses_brush_size = TRUE,
     .is_shape = TRUE,
@@ -1003,6 +1010,7 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .id = "shape-arrow",
     .name = "Arrow",
     .icon_name = "tool-shape-arrow-symbolic",
+    .filled_icon_name = "tool-shape-arrow-filled-symbolic",
     .tooltip = "Arrow · Hold Shift to snap angle",
     .uses_brush_size = TRUE,
     .is_shape = TRUE,
@@ -1031,4 +1039,14 @@ paint_tools_find (const char *tool_id)
       return &BUILTIN_TOOLS[i];
   }
   return &BUILTIN_TOOLS[0];
+}
+
+const char *
+paint_tool_get_icon_name (const PaintTool *tool, const PaintToolSettings *settings)
+{
+  if (!tool)
+    return NULL;
+  if (tool->is_shape && settings && settings->shape_filled && tool->filled_icon_name)
+    return tool->filled_icon_name;
+  return tool->icon_name;
 }

@@ -800,6 +800,30 @@ test_shapes_vertical_flip_triangle_and_star (void)
   paint_document_free (doc);
 }
 
+static void
+test_shape_tool_filled_icon_names (void)
+{
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  gsize n_tools = 0;
+  const PaintTool *tools = paint_tools_get_all (&n_tools);
+
+  for (gsize i = 0; i < n_tools; i++) {
+    settings->shape_filled = FALSE;
+    g_assert_cmpstr (paint_tool_get_icon_name (&tools[i], settings), ==, tools[i].icon_name);
+
+    settings->shape_filled = TRUE;
+    if (tools[i].is_shape) {
+      g_assert_nonnull (tools[i].filled_icon_name);
+      g_assert_cmpstr (paint_tool_get_icon_name (&tools[i], settings), ==, tools[i].filled_icon_name);
+      g_assert_cmpstr (tools[i].filled_icon_name, !=, tools[i].icon_name);
+    } else {
+      g_assert_cmpstr (paint_tool_get_icon_name (&tools[i], settings), ==, tools[i].icon_name);
+    }
+  }
+
+  paint_tool_settings_free (settings);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -818,5 +842,6 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/transparent_png_open_edit_resize_and_save", test_transparent_png_open_edit_resize_and_save);
   g_test_add_func ("/canvas/transparent_brush_and_fill_tools", test_transparent_brush_and_fill_tools);
   g_test_add_func ("/canvas/shapes_vertical_flip_triangle_and_star", test_shapes_vertical_flip_triangle_and_star);
+  g_test_add_func ("/canvas/shape_tool_filled_icon_names", test_shape_tool_filled_icon_names);
   return g_test_run ();
 }

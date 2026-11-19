@@ -11,12 +11,20 @@
     <file>icons/scalable/actions/tool-line-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shapes-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-rect-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-rect-filled-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-rounded-rect-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-rounded-rect-filled-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-ellipse-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-ellipse-filled-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-triangle-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-triangle-filled-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-diamond-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-diamond-filled-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-hexagon-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-hexagon-filled-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-star-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-star-filled-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-arrow-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-arrow-filled-symbolic.svg</file>
   </gresource>
 </gresources>
