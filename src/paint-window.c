@@ -398,6 +398,32 @@ on_discard_tab_response (GObject *source, GAsyncResult *res, gpointer user_data)
   }
 }
 
+static AdwDialog *
+create_single_save_changes_dialog (PaintDocument *doc)
+{
+  GFile *file = paint_document_get_file (doc);
+  g_autofree char *name = file ? g_file_get_basename (file) : g_strdup ("Untitled Canvas");
+  g_autofree char *body = g_strdup_printf (
+      "“%s” contains unsaved changes. Changes which are not saved will be permanently lost.",
+      name);
+
+  AdwDialog *dlg = adw_alert_dialog_new ("Save Changes?", body);
+  adw_alert_dialog_add_responses (ADW_ALERT_DIALOG (dlg),
+                                  "cancel", "Cancel",
+                                  "discard", "Discard",
+                                  "save", file ? "Save" : "Save…",
+                                  NULL);
+  adw_alert_dialog_set_response_appearance (ADW_ALERT_DIALOG (dlg),
+                                            "discard",
+                                            ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_response_appearance (ADW_ALERT_DIALOG (dlg),
+                                            "save",
+                                            ADW_RESPONSE_SUGGESTED);
+  adw_alert_dialog_set_default_response (ADW_ALERT_DIALOG (dlg), "save");
+  adw_alert_dialog_set_close_response (ADW_ALERT_DIALOG (dlg), "cancel");
+  return dlg;
+}
+
 static gboolean
 on_close_page (AdwTabView *view G_GNUC_UNUSED, AdwTabPage *tab_page, gpointer user_data)
 {
@@ -407,26 +433,7 @@ on_close_page (AdwTabView *view G_GNUC_UNUSED, AdwTabPage *tab_page, gpointer us
     PaintDocument *doc = paint_canvas_get_document (
         paint_canvas_page_get_canvas (PAINT_CANVAS_PAGE (child)));
     if (paint_document_get_modified (doc)) {
-      GFile *file = paint_document_get_file (doc);
-      g_autofree char *name = file ? g_file_get_basename (file) : g_strdup ("Untitled Canvas");
-      g_autofree char *body = g_strdup_printf (
-          "“%s” contains unsaved changes. Changes which are not saved will be permanently lost.",
-          name);
-
-      AdwDialog *dlg = adw_alert_dialog_new ("Save Changes?", body);
-      adw_alert_dialog_add_responses (ADW_ALERT_DIALOG (dlg),
-                                      "cancel", "Cancel",
-                                      "discard", "Discard",
-                                      "save", "Save…",
-                                      NULL);
-      adw_alert_dialog_set_response_appearance (ADW_ALERT_DIALOG (dlg),
-                                                "discard",
-                                                ADW_RESPONSE_DESTRUCTIVE);
-      adw_alert_dialog_set_response_appearance (ADW_ALERT_DIALOG (dlg),
-                                                "save",
-                                                ADW_RESPONSE_SUGGESTED);
-      adw_alert_dialog_set_default_response (ADW_ALERT_DIALOG (dlg), "save");
-      adw_alert_dialog_set_close_response (ADW_ALERT_DIALOG (dlg), "cancel");
+      AdwDialog *dlg = create_single_save_changes_dialog (doc);
 
       TabCloseContext *ctx = g_new0 (TabCloseContext, 1);
       ctx->window = self;
@@ -443,24 +450,165 @@ on_close_page (AdwTabView *view G_GNUC_UNUSED, AdwTabPage *tab_page, gpointer us
   return FALSE;
 }
 
+typedef struct {
+  AdwTabPage *tab_page;
+  GtkCheckButton *check;
+} WindowCloseItem;
+
+typedef struct {
+  PaintWindow *window;
+  AdwAlertDialog *dialog;
+  GPtrArray *items;
+  GPtrArray *to_save;
+  GPtrArray *to_discard;
+  guint save_idx;
+} WindowCloseContext;
+
+static void
+window_close_item_free (gpointer data)
+{
+  WindowCloseItem *item = data;
+  g_clear_object (&item->tab_page);
+  g_free (item);
+}
+
+static void
+window_close_context_free (WindowCloseContext *ctx)
+{
+  g_clear_pointer (&ctx->items, g_ptr_array_unref);
+  g_clear_pointer (&ctx->to_save, g_ptr_array_unref);
+  g_clear_pointer (&ctx->to_discard, g_ptr_array_unref);
+  g_free (ctx);
+}
+
+static void
+mark_tab_page_clean (PaintWindow *self, AdwTabPage *tab_page)
+{
+  if (adw_tab_view_get_page_position (self->tab_view, tab_page) < 0)
+    return;
+  GtkWidget *child = adw_tab_page_get_child (tab_page);
+  if (!PAINT_IS_CANVAS_PAGE (child))
+    return;
+  PaintDocument *doc = paint_canvas_get_document (
+      paint_canvas_page_get_canvas (PAINT_CANVAS_PAGE (child)));
+  paint_document_set_modified (doc, FALSE);
+}
+
+static char *
+format_folder_for_display (GFile *file)
+{
+  if (!file)
+    return g_strdup ("Not saved yet");
+
+  g_autoptr (GFile) parent = g_file_get_parent (file);
+  if (!parent)
+    return g_strdup ("Not saved yet");
+
+  g_autofree char *path = g_file_get_path (parent);
+  if (!path)
+    return g_file_get_uri (parent);
+
+  const char *home = g_get_home_dir ();
+  if (home && *home) {
+    gsize home_len = strlen (home);
+    if (strcmp (path, home) == 0)
+      return g_strdup ("~");
+    if (strncmp (path, home, home_len) == 0 && path[home_len] == '/')
+      return g_strconcat ("~", path + home_len, NULL);
+  }
+  return g_steal_pointer (&path);
+}
+
+static void
+on_window_close_check_toggled (GtkCheckButton *btn G_GNUC_UNUSED, gpointer user_data)
+{
+  WindowCloseContext *ctx = user_data;
+  if (!ctx->dialog || !ctx->items)
+    return;
+
+  gboolean any_checked = FALSE;
+  for (guint i = 0; i < ctx->items->len; i++) {
+    WindowCloseItem *item = g_ptr_array_index (ctx->items, i);
+    if (item->check && gtk_check_button_get_active (item->check)) {
+      any_checked = TRUE;
+      break;
+    }
+  }
+  adw_alert_dialog_set_response_enabled (ctx->dialog, "save", any_checked);
+}
+
+static void window_close_save_next (WindowCloseContext *ctx);
+
+static void
+on_window_save_step_done (gboolean ok, gpointer user_data)
+{
+  WindowCloseContext *ctx = user_data;
+  if (!ok) {
+    window_close_context_free (ctx);
+    return;
+  }
+  ctx->save_idx++;
+  window_close_save_next (ctx);
+}
+
+static void
+window_close_save_next (WindowCloseContext *ctx)
+{
+  while (ctx->save_idx < ctx->to_save->len) {
+    AdwTabPage *tab_page = g_ptr_array_index (ctx->to_save, ctx->save_idx);
+    if (adw_tab_view_get_page_position (ctx->window->tab_view, tab_page) < 0) {
+      ctx->save_idx++;
+      continue;
+    }
+    adw_tab_view_set_selected_page (ctx->window->tab_view, tab_page);
+    save_current (ctx->window, FALSE, G_CALLBACK (on_window_save_step_done), ctx);
+    return;
+  }
+
+  for (guint i = 0; i < ctx->to_discard->len; i++) {
+    AdwTabPage *tab_page = g_ptr_array_index (ctx->to_discard, i);
+    mark_tab_page_clean (ctx->window, tab_page);
+  }
+  PaintWindow *win = ctx->window;
+  window_close_context_free (ctx);
+  gtk_window_close (GTK_WINDOW (win));
+}
+
 static void
 on_discard_window_response (GObject *source, GAsyncResult *res, gpointer user_data)
 {
-  PaintWindow *self = PAINT_WINDOW (user_data);
+  WindowCloseContext *ctx = user_data;
+  ctx->dialog = NULL;
   const char *choice = adw_alert_dialog_choose_finish (ADW_ALERT_DIALOG (source), res);
+
   if (g_strcmp0 (choice, "discard") == 0) {
-    int n = adw_tab_view_get_n_pages (self->tab_view);
-    for (int i = 0; i < n; i++) {
-      AdwTabPage *tab = adw_tab_view_get_nth_page (self->tab_view, i);
-      GtkWidget *child = adw_tab_page_get_child (tab);
-      if (PAINT_IS_CANVAS_PAGE (child)) {
-        PaintDocument *doc = paint_canvas_get_document (
-            paint_canvas_page_get_canvas (PAINT_CANVAS_PAGE (child)));
-        paint_document_set_modified (doc, FALSE);
-      }
+    for (guint i = 0; i < ctx->items->len; i++) {
+      WindowCloseItem *item = g_ptr_array_index (ctx->items, i);
+      mark_tab_page_clean (ctx->window, item->tab_page);
     }
-    gtk_window_close (GTK_WINDOW (self));
+    PaintWindow *win = ctx->window;
+    window_close_context_free (ctx);
+    gtk_window_close (GTK_WINDOW (win));
+    return;
   }
+
+  if (g_strcmp0 (choice, "save") == 0) {
+    ctx->to_save = g_ptr_array_new_with_free_func (g_object_unref);
+    ctx->to_discard = g_ptr_array_new_with_free_func (g_object_unref);
+    for (guint i = 0; i < ctx->items->len; i++) {
+      WindowCloseItem *item = g_ptr_array_index (ctx->items, i);
+      if (!item->check || gtk_check_button_get_active (item->check))
+        g_ptr_array_add (ctx->to_save, g_object_ref (item->tab_page));
+      else
+        g_ptr_array_add (ctx->to_discard, g_object_ref (item->tab_page));
+    }
+    g_clear_pointer (&ctx->items, g_ptr_array_unref);
+    ctx->save_idx = 0;
+    window_close_save_next (ctx);
+    return;
+  }
+
+  window_close_context_free (ctx);
 }
 
 static PaintPreferences *
@@ -667,7 +815,7 @@ on_window_close_request (GtkWindow *window, gpointer user_data G_GNUC_UNUSED)
   if (!prefs || !prefs->restore_session)
     paint_window_clear_session ();
 
-  int dirty = 0;
+  g_autoptr (GPtrArray) dirty_tabs = g_ptr_array_new ();
   int n = adw_tab_view_get_n_pages (self->tab_view);
   for (int i = 0; i < n; i++) {
     AdwTabPage *tab = adw_tab_view_get_nth_page (self->tab_view, i);
@@ -676,30 +824,88 @@ on_window_close_request (GtkWindow *window, gpointer user_data G_GNUC_UNUSED)
       PaintDocument *doc = paint_canvas_get_document (
           paint_canvas_page_get_canvas (PAINT_CANVAS_PAGE (child)));
       if (paint_document_get_modified (doc))
-        dirty++;
+        g_ptr_array_add (dirty_tabs, tab);
     }
   }
 
-  if (dirty == 0)
+  if (dirty_tabs->len == 0)
     return FALSE;
 
-  g_autofree char *body = g_strdup_printf (
-      "There are %d canvas(es) with unsaved changes.", dirty);
-  AdwDialog *dlg = adw_alert_dialog_new ("Discard Unsaved Canvases?", body);
-  adw_alert_dialog_add_responses (ADW_ALERT_DIALOG (dlg),
-                                  "cancel", "Cancel",
-                                  "discard", "Discard All",
-                                  NULL);
-  adw_alert_dialog_set_response_appearance (ADW_ALERT_DIALOG (dlg),
-                                            "discard",
-                                            ADW_RESPONSE_DESTRUCTIVE);
-  adw_alert_dialog_set_default_response (ADW_ALERT_DIALOG (dlg), "cancel");
-  adw_alert_dialog_set_close_response (ADW_ALERT_DIALOG (dlg), "cancel");
+  WindowCloseContext *ctx = g_new0 (WindowCloseContext, 1);
+  ctx->window = self;
+  ctx->items = g_ptr_array_new_with_free_func (window_close_item_free);
+
+  AdwDialog *dlg = NULL;
+  if (dirty_tabs->len == 1) {
+    AdwTabPage *tab = g_ptr_array_index (dirty_tabs, 0);
+    PaintDocument *doc = paint_canvas_get_document (
+        paint_canvas_page_get_canvas (PAINT_CANVAS_PAGE (adw_tab_page_get_child (tab))));
+    dlg = create_single_save_changes_dialog (doc);
+
+    WindowCloseItem *item = g_new0 (WindowCloseItem, 1);
+    item->tab_page = g_object_ref (tab);
+    g_ptr_array_add (ctx->items, item);
+  } else {
+    dlg = adw_alert_dialog_new (
+        "Save Changes?",
+        "Open canvases contain unsaved changes. Changes which are not saved will be permanently lost.");
+    adw_alert_dialog_add_responses (ADW_ALERT_DIALOG (dlg),
+                                    "cancel", "Cancel",
+                                    "discard", "Discard All",
+                                    "save", "Save",
+                                    NULL);
+    adw_alert_dialog_set_response_appearance (ADW_ALERT_DIALOG (dlg),
+                                              "discard",
+                                              ADW_RESPONSE_DESTRUCTIVE);
+    adw_alert_dialog_set_response_appearance (ADW_ALERT_DIALOG (dlg),
+                                              "save",
+                                              ADW_RESPONSE_SUGGESTED);
+    adw_alert_dialog_set_default_response (ADW_ALERT_DIALOG (dlg), "save");
+    adw_alert_dialog_set_close_response (ADW_ALERT_DIALOG (dlg), "cancel");
+
+    GtkWidget *list = gtk_list_box_new ();
+    gtk_list_box_set_selection_mode (GTK_LIST_BOX (list), GTK_SELECTION_NONE);
+    gtk_widget_add_css_class (list, "boxed-list");
+
+    for (guint i = 0; i < dirty_tabs->len; i++) {
+      AdwTabPage *tab = g_ptr_array_index (dirty_tabs, i);
+      PaintDocument *doc = paint_canvas_get_document (
+          paint_canvas_page_get_canvas (PAINT_CANVAS_PAGE (adw_tab_page_get_child (tab))));
+      GFile *file = paint_document_get_file (doc);
+      g_autofree char *raw_title = file ? g_file_get_basename (file)
+                                        : g_strdup ("Untitled Canvas (new)");
+      g_autofree char *raw_sub = format_folder_for_display (file);
+      g_autofree char *title = g_markup_escape_text (raw_title, -1);
+      g_autofree char *sub = g_markup_escape_text (raw_sub, -1);
+
+      GtkWidget *row = adw_action_row_new ();
+      adw_preferences_row_set_title (ADW_PREFERENCES_ROW (row), title);
+      adw_action_row_set_subtitle (ADW_ACTION_ROW (row), sub);
+
+      GtkWidget *check = gtk_check_button_new ();
+      gtk_check_button_set_active (GTK_CHECK_BUTTON (check), TRUE);
+      gtk_widget_set_valign (check, GTK_ALIGN_CENTER);
+      adw_action_row_add_prefix (ADW_ACTION_ROW (row), check);
+      adw_action_row_set_activatable_widget (ADW_ACTION_ROW (row), check);
+      gtk_list_box_append (GTK_LIST_BOX (list), row);
+
+      WindowCloseItem *item = g_new0 (WindowCloseItem, 1);
+      item->tab_page = g_object_ref (tab);
+      item->check = GTK_CHECK_BUTTON (check);
+      g_ptr_array_add (ctx->items, item);
+
+      g_signal_connect (check, "toggled", G_CALLBACK (on_window_close_check_toggled), ctx);
+    }
+
+    adw_alert_dialog_set_extra_child (ADW_ALERT_DIALOG (dlg), list);
+  }
+
+  ctx->dialog = ADW_ALERT_DIALOG (dlg);
   adw_alert_dialog_choose (ADW_ALERT_DIALOG (dlg),
                            GTK_WIDGET (self),
                            NULL,
                            on_discard_window_response,
-                           self);
+                           ctx);
   return TRUE;
 }
 
