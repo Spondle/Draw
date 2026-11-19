@@ -295,29 +295,22 @@ sync_tool_ui (PaintCanvasPage *self, const PaintTool *tool)
 }
 
 static void
-apply_tool_selection (PaintCanvasPage *self, const char *tool_id, gboolean close_popover)
-{
-  const PaintTool *tool = paint_tools_find (tool_id);
-  self->settings->active_tool_id = tool->id;
-  sync_tool_ui (self, tool);
-  if (close_popover) {
-    if (tool->is_shape && self->shapes_popover)
-      gtk_popover_popdown (GTK_POPOVER (self->shapes_popover));
-    if (tool->is_transparency && self->transparent_popover)
-      gtk_popover_popdown (GTK_POPOVER (self->transparent_popover));
-  }
-  gtk_widget_queue_draw (GTK_WIDGET (self->canvas));
-}
-
-static void
 on_tool_toggled (GtkToggleButton *btn, gpointer user_data)
 {
   PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
   if (self->syncing || !gtk_toggle_button_get_active (btn))
     return;
   const char *tool_id = g_object_get_data (G_OBJECT (btn), "paint-tool-id");
-  if (tool_id)
-    apply_tool_selection (self, tool_id, TRUE);
+  if (tool_id) {
+    self->settings->active_tool_id = tool_id;
+    const PaintTool *tool = paint_tools_find (tool_id);
+    sync_tool_ui (self, tool);
+    if (tool->is_shape && self->shapes_popover)
+      gtk_popover_popdown (GTK_POPOVER (self->shapes_popover));
+    if (tool->is_transparency && self->transparent_popover)
+      gtk_popover_popdown (GTK_POPOVER (self->transparent_popover));
+    gtk_widget_queue_draw (GTK_WIDGET (self->canvas));
+  }
 }
 
 static void
@@ -328,14 +321,6 @@ on_shape_mode_toggled (GtkToggleButton *btn, gpointer user_data)
     return;
   self->settings->shape_filled = (GTK_WIDGET (btn) == self->shape_fill_btn);
   sync_shape_icons (self);
-
-  /* Selecting Outline/Filled switches right into the active or last shape tool
-   * without closing the popover so the user can still pick a shape. */
-  const PaintTool *cur = paint_tools_find (self->settings->active_tool_id);
-  if (!cur->is_shape) {
-    const char *shape_id = self->last_shape_tool_id ? self->last_shape_tool_id : "shape-rectangle";
-    apply_tool_selection (self, shape_id, FALSE);
-  }
 }
 
 static void
