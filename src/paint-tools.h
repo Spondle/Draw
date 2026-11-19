@@ -28,6 +28,7 @@ struct _PaintTool {
   const char *tooltip;
   gboolean uses_brush_size;
   gboolean is_shape;
+  gboolean is_transparency;
 
   void (*begin_stroke) (const PaintTool *tool,
                         cairo_t *cr,

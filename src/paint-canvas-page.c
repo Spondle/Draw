@@ -50,9 +50,13 @@ struct _PaintCanvasPage {
   GtkWidget *shapes_popover;
   GtkWidget *shape_outline_btn;
   GtkWidget *shape_fill_btn;
+  GtkWidget *transparent_btn;
+  GtkWidget *transparent_popover;
   GtkToggleButton *dummy_primary_btn;
   GtkToggleButton *dummy_shape_btn;
+  GtkToggleButton *dummy_transparent_btn;
   const char *last_shape_tool_id;
+  const char *last_transparency_tool_id;
   GtkWidget *size_btn;
   GtkScale *size_scale;
   GtkWidget *color_btn;
@@ -224,15 +228,35 @@ sync_tool_ui (PaintCanvasPage *self, const PaintTool *tool)
     self->last_shape_tool_id = tool->id;
     if (self->dummy_primary_btn)
       gtk_toggle_button_set_active (self->dummy_primary_btn, TRUE);
+    if (self->dummy_transparent_btn)
+      gtk_toggle_button_set_active (self->dummy_transparent_btn, TRUE);
     if (self->shapes_btn_icon)
       gtk_image_set_from_icon_name (GTK_IMAGE (self->shapes_btn_icon), tool->icon_name);
     if (self->shapes_btn)
       gtk_widget_add_css_class (self->shapes_btn, "paint-tool-active");
+    if (self->transparent_btn)
+      gtk_widget_remove_css_class (self->transparent_btn, "paint-tool-active");
+  } else if (tool->is_transparency) {
+    self->last_transparency_tool_id = tool->id;
+    if (self->dummy_primary_btn)
+      gtk_toggle_button_set_active (self->dummy_primary_btn, TRUE);
+    if (self->dummy_shape_btn)
+      gtk_toggle_button_set_active (self->dummy_shape_btn, TRUE);
+    if (self->transparent_btn) {
+      adw_split_button_set_icon_name (ADW_SPLIT_BUTTON (self->transparent_btn), tool->icon_name);
+      gtk_widget_add_css_class (self->transparent_btn, "paint-tool-active");
+    }
+    if (self->shapes_btn)
+      gtk_widget_remove_css_class (self->shapes_btn, "paint-tool-active");
   } else {
     if (self->dummy_shape_btn)
       gtk_toggle_button_set_active (self->dummy_shape_btn, TRUE);
+    if (self->dummy_transparent_btn)
+      gtk_toggle_button_set_active (self->dummy_transparent_btn, TRUE);
     if (self->shapes_btn)
       gtk_widget_remove_css_class (self->shapes_btn, "paint-tool-active");
+    if (self->transparent_btn)
+      gtk_widget_remove_css_class (self->transparent_btn, "paint-tool-active");
   }
 
   GtkToggleButton *active_btn = g_hash_table_lookup (self->tool_buttons, tool->id);
@@ -254,6 +278,8 @@ on_tool_toggled (GtkToggleButton *btn, gpointer user_data)
     sync_tool_ui (self, tool);
     if (tool->is_shape && self->shapes_popover)
       gtk_popover_popdown (GTK_POPOVER (self->shapes_popover));
+    if (tool->is_transparency && self->transparent_popover)
+      gtk_popover_popdown (GTK_POPOVER (self->transparent_popover));
     gtk_widget_queue_draw (GTK_WIDGET (self->canvas));
   }
 }
@@ -1063,6 +1089,98 @@ build_shapes_popover (PaintCanvasPage *self)
 }
 
 static void
+on_transparent_split_clicked (AdwSplitButton *btn G_GNUC_UNUSED, gpointer user_data)
+{
+  paint_canvas_page_select_last_transparency (PAINT_CANVAS_PAGE (user_data));
+}
+
+static void
+on_clear_transparent_clicked (GtkButton *btn G_GNUC_UNUSED, gpointer user_data)
+{
+  PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
+  if (self->transparent_popover)
+    gtk_popover_popdown (GTK_POPOVER (self->transparent_popover));
+  paint_canvas_clear_transparent (self->canvas);
+}
+
+static GtkPopover *
+build_transparency_popover (PaintCanvasPage *self)
+{
+  GtkWidget *pop = gtk_popover_new ();
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
+  gtk_widget_set_margin_top (box, 10);
+  gtk_widget_set_margin_bottom (box, 10);
+  gtk_widget_set_margin_start (box, 12);
+  gtk_widget_set_margin_end (box, 12);
+
+  GtkWidget *heading = gtk_label_new ("Transparency");
+  gtk_widget_add_css_class (heading, "heading");
+  gtk_widget_set_halign (heading, GTK_ALIGN_START);
+  gtk_box_append (GTK_BOX (box), heading);
+
+  GtkWidget *modes = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_box_set_homogeneous (GTK_BOX (modes), TRUE);
+
+  gsize n_tools = 0;
+  const PaintTool *tools = paint_tools_get_all (&n_tools);
+  GtkToggleButton *first_btn = NULL;
+  for (gsize i = 0; i < n_tools; i++) {
+    if (!tools[i].is_transparency)
+      continue;
+
+    GtkWidget *btn = gtk_toggle_button_new ();
+    gtk_widget_add_css_class (btn, "flat");
+    gtk_widget_add_css_class (btn, "paint-transparency-tile");
+    gtk_widget_set_tooltip_text (btn, tools[i].tooltip);
+
+    GtkWidget *content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign (content, GTK_ALIGN_CENTER);
+    GtkWidget *img = gtk_image_new_from_icon_name (tools[i].icon_name);
+    gtk_image_set_pixel_size (GTK_IMAGE (img), 16);
+    GtkWidget *lbl = gtk_label_new (tools[i].name);
+    gtk_box_append (GTK_BOX (content), img);
+    gtk_box_append (GTK_BOX (content), lbl);
+    gtk_button_set_child (GTK_BUTTON (btn), content);
+
+    if (!first_btn)
+      first_btn = GTK_TOGGLE_BUTTON (btn);
+    else
+      gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (btn), first_btn);
+
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (btn),
+                                  g_strcmp0 (tools[i].id, self->settings->active_tool_id) == 0);
+    g_object_set_data (G_OBJECT (btn), "paint-tool-id", (gpointer) tools[i].id);
+    g_signal_connect (btn, "toggled", G_CALLBACK (on_tool_toggled), self);
+    g_hash_table_insert (self->tool_buttons, (gpointer) tools[i].id, btn);
+
+    gtk_box_append (GTK_BOX (modes), btn);
+  }
+
+  GtkWidget *dummy_transparent = gtk_toggle_button_new ();
+  gtk_widget_set_visible (dummy_transparent, FALSE);
+  if (first_btn)
+    gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (dummy_transparent), first_btn);
+  gtk_box_append (GTK_BOX (box), dummy_transparent);
+  self->dummy_transparent_btn = GTK_TOGGLE_BUTTON (dummy_transparent);
+
+  gtk_box_append (GTK_BOX (box), modes);
+
+  GtkWidget *clear_btn = gtk_button_new_with_label ("Clear Canvas to Transparent");
+  gtk_widget_add_css_class (clear_btn, "paint-transparency-clear");
+  g_signal_connect (clear_btn, "clicked", G_CALLBACK (on_clear_transparent_clicked), self);
+  gtk_box_append (GTK_BOX (box), clear_btn);
+
+  GtkWidget *hint = gtk_label_new ("Save as PNG or WebP to preserve transparency");
+  gtk_widget_add_css_class (hint, "paint-dim-label");
+  gtk_widget_set_halign (hint, GTK_ALIGN_START);
+  gtk_box_append (GTK_BOX (box), hint);
+
+  gtk_popover_set_child (GTK_POPOVER (pop), box);
+  self->transparent_popover = pop;
+  return GTK_POPOVER (pop);
+}
+
+static void
 on_adjustment_changed (GtkAdjustment *adj G_GNUC_UNUSED, gpointer user_data)
 {
   PaintCanvasPage *self = PAINT_CANVAS_PAGE (user_data);
@@ -1170,7 +1288,7 @@ build_ui (PaintCanvasPage *self)
   const PaintTool *tools = paint_tools_get_all (&n_tools);
   GtkToggleButton *first_btn = NULL;
   for (gsize i = 0; i < n_tools; i++) {
-    if (tools[i].is_shape)
+    if (tools[i].is_shape || tools[i].is_transparency)
       continue;
     GtkWidget *btn = gtk_toggle_button_new ();
     gtk_button_set_icon_name (GTK_BUTTON (btn), tools[i].icon_name);
@@ -1195,6 +1313,18 @@ build_ui (PaintCanvasPage *self)
     gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (dummy_primary), first_btn);
   gtk_box_append (GTK_BOX (tools_box), dummy_primary);
   self->dummy_primary_btn = GTK_TOGGLE_BUTTON (dummy_primary);
+
+  self->transparent_btn = adw_split_button_new ();
+  gtk_widget_add_css_class (self->transparent_btn, "flat");
+  gtk_widget_add_css_class (self->transparent_btn, "paint-transparent-button");
+  adw_split_button_set_icon_name (ADW_SPLIT_BUTTON (self->transparent_btn), "tool-transparent-symbolic");
+  gtk_widget_set_tooltip_text (self->transparent_btn, "Transparency (T)");
+  adw_split_button_set_dropdown_tooltip (ADW_SPLIT_BUTTON (self->transparent_btn), "Transparency Options");
+  adw_split_button_set_popover (ADW_SPLIT_BUTTON (self->transparent_btn),
+                                build_transparency_popover (self));
+  g_signal_connect (self->transparent_btn, "clicked",
+                    G_CALLBACK (on_transparent_split_clicked), self);
+  gtk_box_append (GTK_BOX (tools_box), self->transparent_btn);
 
   GtkWidget *shapes_content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
   self->shapes_btn_icon = gtk_image_new_from_icon_name ("tool-shapes-symbolic");
@@ -1281,6 +1411,7 @@ paint_canvas_page_init (PaintCanvasPage *self)
   self->tool_buttons = g_hash_table_new (g_str_hash, g_str_equal);
   self->last_zoom = 1.0;
   self->last_shape_tool_id = "shape-rectangle";
+  self->last_transparency_tool_id = "transparent";
 }
 
 PaintCanvasPage *
@@ -1314,6 +1445,15 @@ paint_canvas_page_select_last_shape (PaintCanvasPage *self)
 {
   const char *shape_id = self->last_shape_tool_id ? self->last_shape_tool_id : "shape-rectangle";
   paint_canvas_page_select_tool (self, shape_id);
+}
+
+void
+paint_canvas_page_select_last_transparency (PaintCanvasPage *self)
+{
+  const char *tool_id = self->last_transparency_tool_id
+                          ? self->last_transparency_tool_id
+                          : "transparent";
+  paint_canvas_page_select_tool (self, tool_id);
 }
 
 void

@@ -13,6 +13,7 @@ G_BEGIN_DECLS
 typedef struct _PaintDocument PaintDocument;
 
 PaintDocument *paint_document_new (int width, int height);
+PaintDocument *paint_document_new_transparent (int width, int height);
 PaintDocument *paint_document_new_from_file (GFile *file, GError **error);
 PaintDocument *paint_document_new_from_draft (GFile *draft_file,
                                               GFile *original_file,
@@ -26,6 +27,7 @@ cairo_surface_t *paint_document_get_surface (const PaintDocument *doc);
 GFile *paint_document_get_file (const PaintDocument *doc);
 gboolean paint_document_get_modified (const PaintDocument *doc);
 void paint_document_set_modified (PaintDocument *doc, gboolean modified);
+gboolean paint_document_has_transparent_background (const PaintDocument *doc);
 
 gboolean paint_document_can_undo (const PaintDocument *doc);
 gboolean paint_document_can_redo (const PaintDocument *doc);
@@ -50,6 +52,7 @@ void paint_document_end_stroke (PaintDocument *doc,
 void paint_document_cancel_stroke (PaintDocument *doc);
 
 void paint_document_clear (PaintDocument *doc);
+void paint_document_clear_transparent (PaintDocument *doc);
 void paint_document_resize (PaintDocument *doc, int new_width, int new_height);
 gboolean paint_document_save_to_file (PaintDocument *doc, GFile *file, GError **error);
 
@@ -73,6 +76,7 @@ void paint_canvas_zoom_reset (PaintCanvas *self);
 gboolean paint_canvas_undo (PaintCanvas *self);
 gboolean paint_canvas_redo (PaintCanvas *self);
 void paint_canvas_clear (PaintCanvas *self);
+void paint_canvas_clear_transparent (PaintCanvas *self);
 void paint_canvas_resize (PaintCanvas *self, int width, int height);
 void paint_canvas_set_show_cursor_ring (PaintCanvas *self, gboolean show);
 void paint_canvas_check_viewport (PaintCanvas *self);

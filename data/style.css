@@ -5,7 +5,7 @@
 }
 
 .paint-canvas-frame {
-    background-color: #ffffff;
+    background-color: transparent;
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.14);
 }
 
@@ -76,6 +76,46 @@
 
 .paint-osd-pill .paint-shapes-button.paint-tool-active > button {
     background-color: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+.paint-osd-pill .paint-transparent-button {
+    border-radius: 9999px;
+}
+
+.paint-osd-pill .paint-transparent-button > button {
+    border-radius: 9999px 0 0 9999px;
+    padding-left: 8px;
+    padding-right: 4px;
+    min-width: 28px;
+}
+
+.paint-osd-pill .paint-transparent-button > menubutton > button {
+    border-radius: 0 9999px 9999px 0;
+    padding-left: 2px;
+    padding-right: 6px;
+    min-width: 20px;
+}
+
+.paint-osd-pill .paint-transparent-button.paint-tool-active > button,
+.paint-osd-pill .paint-transparent-button.paint-tool-active > menubutton > button {
+    background-color: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+.paint-osd-pill .paint-transparency-tile {
+    min-height: 36px;
+    padding: 6px 12px;
+    border-radius: 10px;
+}
+
+.paint-osd-pill .paint-transparency-tile:checked {
+    background-color: color-mix(in srgb, var(--accent-bg-color) 18%, transparent);
+    color: var(--accent-color);
+}
+
+.paint-osd-pill .paint-transparency-clear {
+    border-radius: 8px;
+    min-height: 30px;
+    padding: 4px 10px;
 }
 
 .paint-osd-pill .paint-shape-mode togglebutton {

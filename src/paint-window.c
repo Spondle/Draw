@@ -23,6 +23,7 @@ struct _PaintWindow {
   GtkButton *zoom_pct_btn;
   GtkLabel *info_dims_label;
   GtkLabel *info_zoom_label;
+  GtkLabel *info_bg_label;
   GtkLabel *info_path_label;
 };
 
@@ -181,6 +182,8 @@ sync_window_state (PaintWindow *self)
   gtk_button_set_label (self->zoom_pct_btn, zoom_str);
   gtk_label_set_text (self->info_dims_label, dims_str);
   gtk_label_set_text (self->info_zoom_label, zoom_str);
+  gtk_label_set_text (self->info_bg_label,
+                      paint_document_has_transparent_background (doc) ? "Transparent" : "White");
   gtk_label_set_text (self->info_path_label, path_str ? path_str : "Not saved yet");
 }
 
@@ -718,11 +721,14 @@ on_clear_dialog_response (GObject *source, GAsyncResult *res, gpointer user_data
 static void
 confirm_clear_canvas (PaintWindow *self)
 {
-  if (!get_active_canvas_page (self))
+  PaintCanvasPage *page = get_active_canvas_page (self);
+  if (!page)
     return;
-  AdwDialog *dlg = adw_alert_dialog_new (
-      "Clear Canvas?",
-      "This will fill the entire canvas with the background color. You can still undo this action.");
+  PaintDocument *doc = paint_canvas_get_document (paint_canvas_page_get_canvas (page));
+  const char *body = paint_document_has_transparent_background (doc)
+                       ? "This will clear the entire canvas to transparent. You can still undo this action."
+                       : "This will fill the entire canvas with the background color. You can still undo this action.";
+  AdwDialog *dlg = adw_alert_dialog_new ("Clear Canvas?", body);
   adw_alert_dialog_add_responses (ADW_ALERT_DIALOG (dlg),
                                   "cancel", "Cancel",
                                   "clear", "Clear",
@@ -978,6 +984,13 @@ static void act_tool_fill (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UN
     paint_canvas_page_select_tool (page, "fill");
 }
 
+static void act_tool_transparent (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UNUSED, gpointer d)
+{
+  PaintCanvasPage *page = get_active_canvas_page (PAINT_WINDOW (d));
+  if (page)
+    paint_canvas_page_select_last_transparency (page);
+}
+
 static void act_tool_shape (GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UNUSED, gpointer d)
 {
   PaintCanvasPage *page = get_active_canvas_page (PAINT_WINDOW (d));
@@ -1032,6 +1045,10 @@ on_key_pressed (GtkEventControllerKey *ctrl G_GNUC_UNUSED,
   }
   if (keyval == GDK_KEY_f || keyval == GDK_KEY_F) {
     gtk_widget_activate_action (GTK_WIDGET (self), "win.tool-fill", NULL);
+    return TRUE;
+  }
+  if (keyval == GDK_KEY_t || keyval == GDK_KEY_T) {
+    gtk_widget_activate_action (GTK_WIDGET (self), "win.tool-transparent", NULL);
     return TRUE;
   }
   if (keyval == GDK_KEY_s || keyval == GDK_KEY_S) {
@@ -1176,7 +1193,8 @@ build_info_popover (PaintWindow *self)
 
   self->info_dims_label = add_info_row (GTK_GRID (grid), 0, "Dimensions");
   self->info_zoom_label = add_info_row (GTK_GRID (grid), 1, "Zoom");
-  self->info_path_label = add_info_row (GTK_GRID (grid), 2, "Location");
+  self->info_bg_label = add_info_row (GTK_GRID (grid), 2, "Background");
+  self->info_path_label = add_info_row (GTK_GRID (grid), 3, "Location");
   gtk_label_set_max_width_chars (self->info_path_label, 28);
   gtk_label_set_ellipsize (self->info_path_label, PANGO_ELLIPSIZE_END);
   gtk_box_append (GTK_BOX (box), grid);
@@ -1390,6 +1408,7 @@ paint_window_init (PaintWindow *self)
     { "tool-line", act_tool_line, NULL, NULL, NULL, { 0 } },
     { "tool-eraser", act_tool_eraser, NULL, NULL, NULL, { 0 } },
     { "tool-fill", act_tool_fill, NULL, NULL, NULL, { 0 } },
+    { "tool-transparent", act_tool_transparent, NULL, NULL, NULL, { 0 } },
     { "tool-shape", act_tool_shape, NULL, NULL, NULL, { 0 } },
     { "brush-smaller", act_brush_smaller, NULL, NULL, NULL, { 0 } },
     { "brush-larger", act_brush_larger, NULL, NULL, NULL, { 0 } },

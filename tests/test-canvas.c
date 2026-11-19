@@ -507,6 +507,194 @@ test_shapes_outline_filled_snap_and_undo (void)
   paint_document_free (doc);
 }
 
+static void
+test_transparent_png_open_edit_resize_and_save (void)
+{
+  g_autofree char *tmp_dir = g_dir_make_tmp ("paint-alpha-test-XXXXXX", NULL);
+  g_autofree char *src_path = g_build_filename (tmp_dir, "transparent.png", NULL);
+  g_autofree char *out_path = g_build_filename (tmp_dir, "edited.png", NULL);
+
+  /* Create an RGBA PNG with transparent background, opaque red rect, and semi-transparent pixel */
+  cairo_surface_t *src = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, 60, 60);
+  cairo_t *cr = cairo_create (src);
+  cairo_set_operator (cr, CAIRO_OPERATOR_CLEAR);
+  cairo_paint (cr);
+  cairo_set_operator (cr, CAIRO_OPERATOR_OVER);
+  cairo_set_source_rgba (cr, 1.0, 0.0, 0.0, 1.0);
+  cairo_rectangle (cr, 20.0, 20.0, 20.0, 20.0);
+  cairo_fill (cr);
+  cairo_set_source_rgba (cr, 0.0, 0.0, 1.0, 0.5);
+  cairo_rectangle (cr, 45.0, 45.0, 10.0, 10.0);
+  cairo_fill (cr);
+  cairo_destroy (cr);
+  g_assert_cmpint (cairo_surface_write_to_png (src, src_path), ==, CAIRO_STATUS_SUCCESS);
+  cairo_surface_destroy (src);
+
+  /* Open transparent PNG */
+  g_autoptr (GFile) src_file = g_file_new_for_path (src_path);
+  g_autoptr (GError) err = NULL;
+  PaintDocument *doc = paint_document_new_from_file (src_file, &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (doc);
+  g_assert_true (paint_document_has_transparent_background (doc));
+
+  /* Background remains transparent (a == 0), opaque rect and semi-transparent rect preserved */
+  guint8 r, g, b, a;
+  read_pixel_rgba (doc, 5, 5, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+  read_pixel_rgba (doc, 30, 30, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (g, ==, 0);
+  g_assert_cmpuint (b, ==, 0);
+  g_assert_cmpuint (a, ==, 255);
+  read_pixel_rgba (doc, 50, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (a, >, 100);
+  g_assert_cmpuint (a, <, 160);
+
+  /* Brush draws over transparent canvas while untouched area stays transparent */
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->color = (GdkRGBA) { 0.0f, 1.0f, 0.0f, 1.0f };
+  settings->size = 8.0;
+  const PaintTool *brush = paint_tools_find ("brush");
+  paint_document_begin_stroke (doc, 10.0, 50.0, brush, settings);
+  paint_document_end_stroke (doc, 10.0, 50.0, brush, settings);
+
+  read_pixel_rgba (doc, 10, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (g, ==, 255);
+  g_assert_cmpuint (a, ==, 255);
+  read_pixel_rgba (doc, 5, 5, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+
+  /* Eraser on a transparent PNG erases back to transparent, not white */
+  const PaintTool *eraser = paint_tools_find ("eraser");
+  paint_document_begin_stroke (doc, 10.0, 50.0, eraser, settings);
+  paint_document_end_stroke (doc, 10.0, 50.0, eraser, settings);
+  read_pixel_rgba (doc, 10, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+
+  /* Resizing preserves transparency both in existing and expanded areas */
+  paint_document_resize (doc, 80, 80);
+  read_pixel_rgba (doc, 5, 5, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+  read_pixel_rgba (doc, 70, 70, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+  read_pixel_rgba (doc, 30, 30, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (a, ==, 255);
+
+  /* Save and reopen: transparency survives full roundtrip */
+  g_autoptr (GFile) out_file = g_file_new_for_path (out_path);
+  g_assert_true (paint_document_save_to_file (doc, out_file, &err));
+  g_assert_no_error (err);
+
+  PaintDocument *reloaded = paint_document_new_from_file (out_file, &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (reloaded);
+  g_assert_true (paint_document_has_transparent_background (reloaded));
+  read_pixel_rgba (reloaded, 5, 5, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+  read_pixel_rgba (reloaded, 30, 30, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (a, ==, 255);
+
+  /* Clear on transparent document clears to transparent */
+  paint_document_clear (reloaded);
+  read_pixel_rgba (reloaded, 30, 30, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+
+  g_remove (src_path);
+  g_remove (out_path);
+  g_rmdir (tmp_dir);
+  paint_document_free (reloaded);
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
+static void
+test_transparent_brush_and_fill_tools (void)
+{
+  PaintDocument *doc = paint_document_new (100, 100);
+  g_assert_false (paint_document_has_transparent_background (doc));
+
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->size = 12.0;
+
+  /* 1. Transparent Brush punches transparent strokes into an opaque white canvas */
+  const PaintTool *tbrush = paint_tools_find ("transparent");
+  g_assert_cmpstr (tbrush->id, ==, "transparent");
+  g_assert_true (tbrush->is_transparency);
+  g_assert_true (tbrush->uses_brush_size);
+
+  paint_document_begin_stroke (doc, 20.0, 20.0, tbrush, settings);
+  paint_document_continue_stroke (doc, 40.0, 20.0, tbrush, settings);
+  paint_document_end_stroke (doc, 50.0, 20.0, tbrush, settings);
+
+  guint8 r, g, b, a;
+  read_pixel_rgba (doc, 30, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+  read_pixel_rgba (doc, 80, 80, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (a, ==, 255);
+
+  /* Resizing an opaque canvas with transparent cutouts must preserve those cutouts */
+  paint_document_resize (doc, 120, 120);
+  read_pixel_rgba (doc, 30, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+  read_pixel_rgba (doc, 110, 110, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (a, ==, 255);
+
+  /* Undo resize + undo transparent stroke restores opaque white */
+  g_assert_true (paint_document_undo (doc));
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 30, 20, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (a, ==, 255);
+
+  /* 2. Transparent Fill removes contiguous white background around a solid blue square */
+  cairo_t *cr = cairo_create (paint_document_get_surface (doc));
+  cairo_set_source_rgba (cr, 0.0, 0.0, 1.0, 1.0);
+  cairo_rectangle (cr, 35.0, 35.0, 30.0, 30.0);
+  cairo_fill (cr);
+  cairo_destroy (cr);
+
+  const PaintTool *tfill = paint_tools_find ("transparent-fill");
+  g_assert_cmpstr (tfill->id, ==, "transparent-fill");
+  g_assert_true (tfill->is_transparency);
+  g_assert_false (tfill->uses_brush_size);
+
+  paint_document_begin_stroke (doc, 5.0, 5.0, tfill, settings);
+  paint_document_end_stroke (doc, 5.0, 5.0, tfill, settings);
+
+  /* Outside becomes transparent, blue square stays opaque blue */
+  read_pixel_rgba (doc, 5, 5, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+  read_pixel_rgba (doc, 50, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_cmpuint (a, ==, 255);
+
+  /* Undo restores white background */
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 5, 5, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (a, ==, 255);
+
+  /* 3. Clear to transparent sets transparent background and undo restores white background */
+  paint_document_clear_transparent (doc);
+  g_assert_true (paint_document_has_transparent_background (doc));
+  read_pixel_rgba (doc, 50, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (a, ==, 0);
+
+  g_assert_true (paint_document_undo (doc));
+  g_assert_false (paint_document_has_transparent_background (doc));
+  read_pixel_rgba (doc, 50, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_cmpuint (a, ==, 255);
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -522,5 +710,7 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/line_tool_and_undo_redo", test_line_tool_and_undo_redo);
   g_test_add_func ("/canvas/line_tool_tiled_undo_cancel_and_snap", test_line_tool_tiled_undo_cancel_and_snap);
   g_test_add_func ("/canvas/shapes_outline_filled_snap_and_undo", test_shapes_outline_filled_snap_and_undo);
+  g_test_add_func ("/canvas/transparent_png_open_edit_resize_and_save", test_transparent_png_open_edit_resize_and_save);
+  g_test_add_func ("/canvas/transparent_brush_and_fill_tools", test_transparent_brush_and_fill_tools);
   return g_test_run ();
 }

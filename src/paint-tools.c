@@ -45,6 +45,10 @@ configure_brush_context (cairo_t *cr, const PaintToolSettings *settings)
 static void
 configure_eraser_context (cairo_t *cr, const PaintToolSettings *settings)
 {
+  if (settings->background_color.alpha <= 0.0f) {
+    cairo_set_operator (cr, CAIRO_OPERATOR_CLEAR);
+    return;
+  }
   cairo_set_source_rgba (cr,
                          settings->background_color.red,
                          settings->background_color.green,
@@ -54,9 +58,17 @@ configure_eraser_context (cairo_t *cr, const PaintToolSettings *settings)
 }
 
 static void
+configure_transparent_context (cairo_t *cr)
+{
+  cairo_set_operator (cr, CAIRO_OPERATOR_CLEAR);
+}
+
+static void
 configure_for_tool (const PaintTool *tool, cairo_t *cr, const PaintToolSettings *settings)
 {
-  if (g_strcmp0 (tool->id, "eraser") == 0)
+  if (g_strcmp0 (tool->id, "transparent") == 0)
+    configure_transparent_context (cr);
+  else if (g_strcmp0 (tool->id, "eraser") == 0)
     configure_eraser_context (cr, settings);
   else
     configure_brush_context (cr, settings);
@@ -250,11 +262,11 @@ blend_over_argb32 (uint32_t dst, uint32_t src_pm, uint8_t src_a)
 }
 
 static void
-fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
-                   cairo_t *cr,
-                   double x,
-                   double y,
-                   PaintToolSettings *settings)
+flood_fill_surface (cairo_t *cr,
+                    double x,
+                    double y,
+                    const PaintToolSettings *settings,
+                    gboolean make_transparent)
 {
   cairo_surface_t *surface = cairo_get_target (cr);
   if (!surface || cairo_surface_get_type (surface) != CAIRO_SURFACE_TYPE_IMAGE)
@@ -271,15 +283,22 @@ fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
   if (sx < 0 || sx >= w || sy < 0 || sy >= h)
     return;
 
-  uint8_t fill_a = 255;
-  uint32_t fill_px = rgba_to_premultiplied_argb32 (&settings->color, &fill_a);
-  if (fill_a == 0)
-    return;
+  uint8_t fill_a = 0;
+  uint32_t fill_px = 0;
+  if (!make_transparent) {
+    fill_px = rgba_to_premultiplied_argb32 (&settings->color, &fill_a);
+    if (fill_a == 0)
+      return;
+  }
 
   uint32_t *start_row = (uint32_t *) (data + (gsize) sy * (gsize) stride);
   uint32_t target_px = start_row[sx];
-  if (fill_a == 255 && target_px == fill_px)
+  if (make_transparent) {
+    if (((target_px >> 24) & 0xFFU) == 0)
+      return;
+  } else if (fill_a == 255 && target_px == fill_px) {
     return;
+  }
 
   guint8 *visited = g_malloc0 ((gsize) w * (gsize) h);
   GArray *stack = g_array_new (FALSE, FALSE, sizeof (FillSeed));
@@ -326,7 +345,10 @@ fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
 
     for (int col = left; col <= right; col++) {
       vis_row[col] = 1;
-      row[col] = blend_over_argb32 (row[col], fill_px, fill_a);
+      if (make_transparent)
+        row[col] = 0x00000000U;
+      else
+        row[col] = blend_over_argb32 (row[col], fill_px, fill_a);
 
       if (row_y > 0) {
         uint32_t *above_row = (uint32_t *) (data + (gsize) (row_y - 1) * (gsize) stride);
@@ -361,6 +383,7 @@ fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
   int y1 = MIN (h - 1, max_y + 1);
   int x0 = MAX (0, min_x - 1);
   int x1 = MIN (w - 1, max_x + 1);
+  uint32_t target_a = (target_px >> 24) & 0xFFU;
 
   for (int row_y = y0; row_y <= y1; row_y++) {
     uint32_t *row = (uint32_t *) (data + (gsize) row_y * (gsize) stride);
@@ -388,23 +411,61 @@ fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
         continue;
 
       uint32_t px = row[col];
-      if (pixel_is_blend_between (px, target_px, fill_px)) {
-        row[col] = blend_over_argb32 (px, fill_px, fill_a);
+      uint32_t px_a = (px >> 24) & 0xFFU;
+
+      if (make_transparent) {
+        if (px_a == 0)
+          continue;
+        if (pixel_is_blend_between (px, target_px, 0x00000000U)) {
+          row[col] = 0x00000000U;
+        } else {
+          int diff = pixel_max_diff (px, target_px);
+          if (diff <= FILL_FRINGE_MAX_DIST) {
+            double clear_w = (double) (FILL_FRINGE_MAX_DIST + 10 - diff) /
+                             (double) (FILL_FRINGE_MAX_DIST + 10);
+            clear_w = CLAMP (clear_w, 0.0, 1.0);
+            double keep = 1.0 - clear_w;
+            uint32_t out_a = (uint32_t) lround ((double) px_a * keep);
+            if (out_a == 0) {
+              row[col] = 0x00000000U;
+            } else {
+              double tr = (double) ((target_px >> 16) & 0xFFU);
+              double tg = (double) ((target_px >> 8) & 0xFFU);
+              double tb = (double) (target_px & 0xFFU);
+              double pr = (double) ((px >> 16) & 0xFFU);
+              double pg = (double) ((px >> 8) & 0xFFU);
+              double pb = (double) (px & 0xFFU);
+              int r = CLAMP ((int) lround (pr - clear_w * tr), 0, (int) out_a);
+              int g = CLAMP ((int) lround (pg - clear_w * tg), 0, (int) out_a);
+              int b = CLAMP ((int) lround (pb - clear_w * tb), 0, (int) out_a);
+              row[col] = (out_a << 24) |
+                         ((uint32_t) r << 16) |
+                         ((uint32_t) g << 8) |
+                         (uint32_t) b;
+            }
+          }
+        }
       } else {
-        int diff = pixel_max_diff (px, target_px);
-        if (diff <= FILL_FRINGE_MAX_DIST) {
-          double weight = (double) (FILL_FRINGE_MAX_DIST + 10 - diff) /
-                          (double) (FILL_FRINGE_MAX_DIST + 10);
-          uint8_t blend_a = (uint8_t) lround (CLAMP (weight, 0.0, 1.0) * (double) fill_a);
-          if (blend_a > 0) {
-            uint8_t pm_r = (uint8_t) lround (CLAMP (settings->color.red, 0.0f, 1.0f) * blend_a);
-            uint8_t pm_g = (uint8_t) lround (CLAMP (settings->color.green, 0.0f, 1.0f) * blend_a);
-            uint8_t pm_b = (uint8_t) lround (CLAMP (settings->color.blue, 0.0f, 1.0f) * blend_a);
-            uint32_t pm_px = ((uint32_t) blend_a << 24) |
-                             ((uint32_t) pm_r << 16) |
-                             ((uint32_t) pm_g << 8) |
-                             (uint32_t) pm_b;
-            row[col] = blend_over_argb32 (px, pm_px, blend_a);
+        if (target_a > 0 && px_a == 0)
+          continue;
+        if (pixel_is_blend_between (px, target_px, fill_px)) {
+          row[col] = blend_over_argb32 (px, fill_px, fill_a);
+        } else {
+          int diff = pixel_max_diff (px, target_px);
+          if (diff <= FILL_FRINGE_MAX_DIST) {
+            double weight = (double) (FILL_FRINGE_MAX_DIST + 10 - diff) /
+                            (double) (FILL_FRINGE_MAX_DIST + 10);
+            uint8_t blend_a = (uint8_t) lround (CLAMP (weight, 0.0, 1.0) * (double) fill_a);
+            if (blend_a > 0) {
+              uint8_t pm_r = (uint8_t) lround (CLAMP (settings->color.red, 0.0f, 1.0f) * blend_a);
+              uint8_t pm_g = (uint8_t) lround (CLAMP (settings->color.green, 0.0f, 1.0f) * blend_a);
+              uint8_t pm_b = (uint8_t) lround (CLAMP (settings->color.blue, 0.0f, 1.0f) * blend_a);
+              uint32_t pm_px = ((uint32_t) blend_a << 24) |
+                               ((uint32_t) pm_r << 16) |
+                               ((uint32_t) pm_g << 8) |
+                               (uint32_t) pm_b;
+              row[col] = blend_over_argb32 (px, pm_px, blend_a);
+            }
           }
         }
       }
@@ -414,6 +475,26 @@ fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
   g_array_free (stack, TRUE);
   g_free (visited);
   cairo_surface_mark_dirty (surface);
+}
+
+static void
+fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
+                   cairo_t *cr,
+                   double x,
+                   double y,
+                   PaintToolSettings *settings)
+{
+  flood_fill_surface (cr, x, y, settings, FALSE);
+}
+
+static void
+transparent_fill_begin_stroke (const PaintTool *tool G_GNUC_UNUSED,
+                               cairo_t *cr,
+                               double x,
+                               double y,
+                               PaintToolSettings *settings)
+{
+  flood_fill_surface (cr, x, y, settings, TRUE);
 }
 
 static void
@@ -794,6 +875,28 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .tooltip = "Fill (F)",
     .uses_brush_size = FALSE,
     .begin_stroke = fill_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = fill_noop,
+  },
+  {
+    .id = "transparent",
+    .name = "Brush",
+    .icon_name = "tool-transparent-symbolic",
+    .tooltip = "Transparent Brush (T) · Paint areas transparent",
+    .uses_brush_size = TRUE,
+    .is_transparency = TRUE,
+    .begin_stroke = freehand_begin_stroke,
+    .continue_stroke = freehand_continue_stroke,
+    .end_stroke = freehand_end_stroke,
+  },
+  {
+    .id = "transparent-fill",
+    .name = "Fill",
+    .icon_name = "tool-transparent-fill-symbolic",
+    .tooltip = "Transparent Fill · Click an area to make it transparent",
+    .uses_brush_size = FALSE,
+    .is_transparency = TRUE,
+    .begin_stroke = transparent_fill_begin_stroke,
     .continue_stroke = fill_noop,
     .end_stroke = fill_noop,
   },

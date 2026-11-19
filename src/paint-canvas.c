@@ -41,6 +41,7 @@ typedef struct {
   int width;
   int height;
   gboolean is_full;
+  GdkRGBA background_color;
   int full_stride;
   GBytes *full_pixels;
   GPtrArray *tiles;       /* element-type: UndoTile* */
@@ -98,7 +99,7 @@ restore_rect_tile (cairo_surface_t *surface, const UndoTile *t)
 }
 
 static UndoStep *
-undo_step_new_full (cairo_surface_t *surface)
+undo_step_new_full (cairo_surface_t *surface, const GdkRGBA *background_color)
 {
   cairo_surface_flush (surface);
   int w = cairo_image_surface_get_width (surface);
@@ -110,6 +111,9 @@ undo_step_new_full (cairo_surface_t *surface)
   step->width = w;
   step->height = h;
   step->is_full = TRUE;
+  step->background_color = background_color
+                             ? *background_color
+                             : (GdkRGBA) { 1.0f, 1.0f, 1.0f, 1.0f };
   step->full_stride = stride;
   step->full_pixels = g_bytes_new (data, (gsize) stride * (gsize) h);
   return step;
@@ -265,18 +269,56 @@ create_blank_surface (int width, int height, const GdkRGBA *bg)
   return surface;
 }
 
-PaintDocument *
-paint_document_new (int width, int height)
+static PaintDocument *
+paint_document_new_with_background (int width, int height, const GdkRGBA *bg)
 {
   PaintDocument *doc = g_new0 (PaintDocument, 1);
   doc->width = MAX (1, width);
   doc->height = MAX (1, height);
-  doc->background_color = (GdkRGBA) { 1.0f, 1.0f, 1.0f, 1.0f };
+  doc->background_color = *bg;
   doc->surface = create_blank_surface (doc->width, doc->height, &doc->background_color);
   doc->undo_stack = g_ptr_array_new_with_free_func (undo_step_free);
   doc->redo_stack = g_ptr_array_new_with_free_func (undo_step_free);
   doc->all_dirty = TRUE;
   return doc;
+}
+
+PaintDocument *
+paint_document_new (int width, int height)
+{
+  GdkRGBA white = { 1.0f, 1.0f, 1.0f, 1.0f };
+  return paint_document_new_with_background (width, height, &white);
+}
+
+PaintDocument *
+paint_document_new_transparent (int width, int height)
+{
+  GdkRGBA transparent = { 0.0f, 0.0f, 0.0f, 0.0f };
+  return paint_document_new_with_background (width, height, &transparent);
+}
+
+static gboolean
+surface_has_transparency (cairo_surface_t *surface)
+{
+  if (!surface || cairo_surface_get_type (surface) != CAIRO_SURFACE_TYPE_IMAGE)
+    return FALSE;
+  if (cairo_image_surface_get_format (surface) != CAIRO_FORMAT_ARGB32)
+    return FALSE;
+
+  cairo_surface_flush (surface);
+  int w = cairo_image_surface_get_width (surface);
+  int h = cairo_image_surface_get_height (surface);
+  int stride = cairo_image_surface_get_stride (surface);
+  const unsigned char *data = cairo_image_surface_get_data (surface);
+
+  for (int y = 0; y < h; y++) {
+    const uint32_t *row = (const uint32_t *) (data + (gsize) y * (gsize) stride);
+    for (int x = 0; x < w; x++) {
+      if (((row[x] >> 24) & 0xFFU) < 255U)
+        return TRUE;
+    }
+  }
+  return FALSE;
 }
 
 typedef struct {
@@ -310,9 +352,10 @@ paint_document_new_from_file (GFile *file, GError **error)
   g_return_val_if_fail (G_IS_FILE (file), NULL);
 
   g_autofree char *path = g_file_get_path (file);
+  g_autofree char *lower = path ? g_ascii_strdown (path, -1) : NULL;
   cairo_surface_t *loaded = NULL;
 
-  if (path && g_str_has_suffix (g_ascii_strdown (path, -1), ".png")) {
+  if (lower && g_str_has_suffix (lower, ".png")) {
     loaded = cairo_image_surface_create_from_png (path);
     if (cairo_surface_status (loaded) != CAIRO_STATUS_SUCCESS) {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -340,8 +383,11 @@ paint_document_new_from_file (GFile *file, GError **error)
 
   int w = cairo_image_surface_get_width (loaded);
   int h = cairo_image_surface_get_height (loaded);
-  PaintDocument *doc = paint_document_new (w, h);
+  gboolean has_alpha = surface_has_transparency (loaded);
+  PaintDocument *doc = has_alpha ? paint_document_new_transparent (w, h)
+                                 : paint_document_new (w, h);
   cairo_t *cr = cairo_create (doc->surface);
+  cairo_set_operator (cr, CAIRO_OPERATOR_SOURCE);
   cairo_set_source_surface (cr, loaded, 0, 0);
   cairo_paint (cr);
   cairo_destroy (cr);
@@ -417,6 +463,12 @@ paint_document_set_modified (PaintDocument *doc, gboolean modified)
 }
 
 gboolean
+paint_document_has_transparent_background (const PaintDocument *doc)
+{
+  return doc && doc->background_color.alpha < 0.5f;
+}
+
+gboolean
 paint_document_can_undo (const PaintDocument *doc)
 {
   return doc->undo_stack->len > 0 || doc->active_stroke_undo != NULL;
@@ -432,11 +484,12 @@ static UndoStep *
 apply_undo_step (PaintDocument *doc, const UndoStep *step)
 {
   if (step->is_full) {
-    UndoStep *reverse = undo_step_new_full (doc->surface);
+    UndoStep *reverse = undo_step_new_full (doc->surface, &doc->background_color);
     cairo_surface_destroy (doc->surface);
     doc->surface = restore_full_surface (step);
     doc->width = cairo_image_surface_get_width (doc->surface);
     doc->height = cairo_image_surface_get_height (doc->surface);
+    doc->background_color = step->background_color;
     mark_all_dirty (doc);
     return reverse;
   }
@@ -553,10 +606,14 @@ paint_document_begin_stroke (PaintDocument *doc,
   doc->prev2_stroke_x = x;
   doc->prev2_stroke_y = y;
 
+  GdkRGBA prev_bg = settings->background_color;
+  settings->background_color = doc->background_color;
+
   if (tool->draw_preview) {
     cairo_t *cr = cairo_create (doc->surface);
     tool->begin_stroke (tool, cr, x, y, settings);
     cairo_destroy (cr);
+    settings->background_color = prev_bg;
     return;
   }
 
@@ -572,13 +629,14 @@ paint_document_begin_stroke (PaintDocument *doc,
     cairo_destroy (cr);
     mark_rect_dirty (doc, rx, ry, rw, rh);
   } else {
-    push_undo_step (doc, undo_step_new_full (doc->surface));
+    push_undo_step (doc, undo_step_new_full (doc->surface, &doc->background_color));
     cairo_t *cr = cairo_create (doc->surface);
     tool->begin_stroke (tool, cr, x, y, settings);
     cairo_destroy (cr);
     mark_all_dirty (doc);
   }
 
+  settings->background_color = prev_bg;
   doc->modified = TRUE;
 }
 
@@ -589,10 +647,14 @@ paint_document_continue_stroke (PaintDocument *doc,
                                 const PaintTool *tool,
                                 PaintToolSettings *settings)
 {
+  GdkRGBA prev_bg = settings->background_color;
+  settings->background_color = doc->background_color;
+
   if (tool->draw_preview) {
     cairo_t *cr = cairo_create (doc->surface);
     tool->continue_stroke (tool, cr, x, y, settings);
     cairo_destroy (cr);
+    settings->background_color = prev_bg;
     return;
   }
 
@@ -628,6 +690,7 @@ paint_document_continue_stroke (PaintDocument *doc,
     cairo_destroy (cr);
   }
 
+  settings->background_color = prev_bg;
   doc->modified = TRUE;
 }
 
@@ -638,6 +701,9 @@ paint_document_end_stroke (PaintDocument *doc,
                            const PaintTool *tool,
                            PaintToolSettings *settings)
 {
+  GdkRGBA prev_bg = settings->background_color;
+  settings->background_color = doc->background_color;
+
   if (tool->draw_preview) {
     int rx, ry, rw, rh;
     compute_tool_stroke_bounds (tool, settings, doc->stroke_start_x, doc->stroke_start_y,
@@ -652,6 +718,7 @@ paint_document_end_stroke (PaintDocument *doc,
     mark_rect_dirty (doc, rx, ry, rw, rh);
 
     push_undo_step (doc, step);
+    settings->background_color = prev_bg;
     doc->modified = TRUE;
     return;
   }
@@ -679,6 +746,7 @@ paint_document_end_stroke (PaintDocument *doc,
     cairo_destroy (cr);
   }
 
+  settings->background_color = prev_bg;
   doc->modified = TRUE;
 }
 
@@ -708,7 +776,7 @@ paint_document_clear (PaintDocument *doc)
     push_undo_step (doc, doc->active_stroke_undo);
     doc->active_stroke_undo = NULL;
   }
-  push_undo_step (doc, undo_step_new_full (doc->surface));
+  push_undo_step (doc, undo_step_new_full (doc->surface, &doc->background_color));
   cairo_t *cr = cairo_create (doc->surface);
   cairo_set_source_rgba (cr,
                          doc->background_color.red,
@@ -716,6 +784,23 @@ paint_document_clear (PaintDocument *doc)
                          doc->background_color.blue,
                          doc->background_color.alpha);
   cairo_set_operator (cr, CAIRO_OPERATOR_SOURCE);
+  cairo_paint (cr);
+  cairo_destroy (cr);
+  doc->modified = TRUE;
+  mark_all_dirty (doc);
+}
+
+void
+paint_document_clear_transparent (PaintDocument *doc)
+{
+  if (doc->active_stroke_undo) {
+    push_undo_step (doc, doc->active_stroke_undo);
+    doc->active_stroke_undo = NULL;
+  }
+  push_undo_step (doc, undo_step_new_full (doc->surface, &doc->background_color));
+  doc->background_color = (GdkRGBA) { 0.0f, 0.0f, 0.0f, 0.0f };
+  cairo_t *cr = cairo_create (doc->surface);
+  cairo_set_operator (cr, CAIRO_OPERATOR_CLEAR);
   cairo_paint (cr);
   cairo_destroy (cr);
   doc->modified = TRUE;
@@ -734,10 +819,13 @@ paint_document_resize (PaintDocument *doc, int new_width, int new_height)
     push_undo_step (doc, doc->active_stroke_undo);
     doc->active_stroke_undo = NULL;
   }
-  push_undo_step (doc, undo_step_new_full (doc->surface));
+  push_undo_step (doc, undo_step_new_full (doc->surface, &doc->background_color));
 
   cairo_surface_t *new_surface = create_blank_surface (w, h, &doc->background_color);
   cairo_t *cr = cairo_create (new_surface);
+  cairo_rectangle (cr, 0.0, 0.0, (double) MIN (w, doc->width), (double) MIN (h, doc->height));
+  cairo_clip (cr);
+  cairo_set_operator (cr, CAIRO_OPERATOR_SOURCE);
   cairo_set_source_surface (cr, doc->surface, 0, 0);
   cairo_paint (cr);
   cairo_destroy (cr);
@@ -784,10 +872,24 @@ paint_document_save_to_file (PaintDocument *doc, GFile *file, GError **error)
     }
   } else {
     target_file = g_object_ref (file);
+    gboolean is_jpeg = (g_strcmp0 (ext, ".jpg") == 0 || g_strcmp0 (ext, ".jpeg") == 0);
+    cairo_surface_t *export_surface = doc->surface;
+    cairo_surface_t *flattened = NULL;
+    if (is_jpeg) {
+      GdkRGBA white = { 1.0f, 1.0f, 1.0f, 1.0f };
+      flattened = create_blank_surface (doc->width, doc->height, &white);
+      cairo_t *fcr = cairo_create (flattened);
+      cairo_set_source_surface (fcr, doc->surface, 0, 0);
+      cairo_paint (fcr);
+      cairo_destroy (fcr);
+      export_surface = flattened;
+    }
+
     GByteArray *arr = g_byte_array_new ();
-    cairo_status_t status = cairo_surface_write_to_png_stream (doc->surface,
+    cairo_status_t status = cairo_surface_write_to_png_stream (export_surface,
                                                                cairo_write_to_byte_array,
                                                                arr);
+    g_clear_pointer (&flattened, cairo_surface_destroy);
     if (status != CAIRO_STATUS_SUCCESS) {
       g_byte_array_unref (arr);
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -801,9 +903,7 @@ paint_document_save_to_file (PaintDocument *doc, GFile *file, GError **error)
     if (!pixbuf)
       return FALSE;
 
-    const char *fmt = (g_strcmp0 (ext, ".jpg") == 0 || g_strcmp0 (ext, ".jpeg") == 0)
-                        ? "jpeg"
-                        : ext + 1;
+    const char *fmt = is_jpeg ? "jpeg" : ext + 1;
     if (!gdk_pixbuf_save (pixbuf, path, fmt, error, NULL))
       return FALSE;
   }
@@ -857,6 +957,9 @@ struct _PaintCanvas {
   gboolean ov_all_dirty;
   gboolean ov_has_dirty_rect;
   cairo_rectangle_int_t ov_dirty_rect;
+
+  /* Repeating 16x16 checkerboard texture for transparent regions */
+  GdkTexture *checker_texture;
 
   double zoom;
   gboolean has_hover;
@@ -1402,6 +1505,31 @@ paint_canvas_measure (GtkWidget *widget,
     *natural_baseline = -1;
 }
 
+static GdkTexture *
+ensure_checker_texture (PaintCanvas *self)
+{
+  if (self->checker_texture)
+    return self->checker_texture;
+
+  const int tile = 16;
+  const int cell = 8;
+  uint32_t pixels[16 * 16];
+  const uint32_t light = 0xFFF0F0F2U;
+  const uint32_t dark = 0xFFD2D2D8U;
+
+  for (int y = 0; y < tile; y++) {
+    for (int x = 0; x < tile; x++) {
+      gboolean is_dark = (((x / cell) + (y / cell)) & 1) != 0;
+      pixels[y * tile + x] = is_dark ? dark : light;
+    }
+  }
+
+  g_autoptr (GBytes) bytes = g_bytes_new (pixels, sizeof (pixels));
+  self->checker_texture = gdk_memory_texture_new (tile, tile, GDK_MEMORY_DEFAULT,
+                                                  bytes, (gsize) tile * 4);
+  return self->checker_texture;
+}
+
 static void
 paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 {
@@ -1424,6 +1552,17 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
   int active_div = 1;
   GskScalingFilter canvas_filter = GSK_SCALING_FILTER_LINEAR;
   graphene_rect_t vis_rect = compute_visible_widget_rect (self);
+
+  if (vis_rect.size.width > 0.0f && vis_rect.size.height > 0.0f) {
+    GdkTexture *checker = ensure_checker_texture (self);
+    graphene_rect_t tile_rect = GRAPHENE_RECT_INIT (0.0f, 0.0f, 16.0f, 16.0f);
+    gtk_snapshot_push_repeat (snapshot, &vis_rect, &tile_rect);
+    gtk_snapshot_append_scaled_texture (snapshot,
+                                        checker,
+                                        GSK_SCALING_FILTER_NEAREST,
+                                        &tile_rect);
+    gtk_snapshot_pop (snapshot);
+  }
 
   if (target_vp_div (self) == 0) {
     GdkTexture *tex = ensure_overview_texture (self, device_scale);
@@ -1746,6 +1885,7 @@ paint_canvas_finalize (GObject *object)
 {
   PaintCanvas *self = PAINT_CANVAS (object);
   invalidate_viewport_cache (self);
+  g_clear_object (&self->checker_texture);
   g_clear_pointer (&self->vp_surface, cairo_surface_destroy);
   g_clear_pointer (&self->ov_surface, cairo_surface_destroy);
   g_clear_pointer (&self->document, paint_document_free);
@@ -1924,6 +2064,14 @@ void
 paint_canvas_clear (PaintCanvas *self)
 {
   paint_document_clear (self->document);
+  gtk_widget_queue_draw (GTK_WIDGET (self));
+  g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+}
+
+void
+paint_canvas_clear_transparent (PaintCanvas *self)
+{
+  paint_document_clear_transparent (self->document);
   gtk_widget_queue_draw (GTK_WIDGET (self));
   g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
 }
