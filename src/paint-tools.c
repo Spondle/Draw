@@ -757,6 +757,7 @@ shape_draw_preview (const PaintTool *tool,
   double cy = by + bh * 0.5;
   double rx = bw * 0.5;
   double ry = bh * 0.5;
+  double sry = (y1 < y0) ? -ry : ry;
 
   if (g_strcmp0 (tool->id, "shape-rectangle") == 0) {
     cairo_rectangle (cr, bx, by, bw, bh);
@@ -773,9 +774,9 @@ shape_draw_preview (const PaintTool *tool,
     cairo_restore (cr);
     finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
   } else if (g_strcmp0 (tool->id, "shape-triangle") == 0) {
-    cairo_move_to (cr, cx, by);
-    cairo_line_to (cr, bx + bw, by + bh);
-    cairo_line_to (cr, bx, by + bh);
+    cairo_move_to (cr, cx, y0);
+    cairo_line_to (cr, bx + bw, y1);
+    cairo_line_to (cr, bx, y1);
     cairo_close_path (cr);
     finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
   } else if (g_strcmp0 (tool->id, "shape-diamond") == 0) {
@@ -789,7 +790,7 @@ shape_draw_preview (const PaintTool *tool,
     build_polygon_path (cr, cx, cy, rx, ry, 6, 0.0);
     finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
   } else if (g_strcmp0 (tool->id, "shape-star") == 0) {
-    build_polygon_path (cr, cx, cy, rx, ry, 5, 0.38196601125);
+    build_polygon_path (cr, cx, cy, rx, sry, 5, 0.38196601125);
     finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
   }
 }

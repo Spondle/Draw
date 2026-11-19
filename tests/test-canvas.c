@@ -695,6 +695,72 @@ test_transparent_brush_and_fill_tools (void)
   paint_document_free (doc);
 }
 
+static void
+test_shapes_vertical_flip_triangle_and_star (void)
+{
+  PaintDocument *doc = paint_document_new (200, 200);
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->color = (GdkRGBA) { 0.0f, 0.0f, 1.0f, 1.0f };
+  settings->shape_filled = TRUE;
+
+  const PaintTool *triangle = paint_tools_find ("shape-triangle");
+  const PaintTool *star = paint_tools_find ("shape-star");
+  guint8 r, g, b, a;
+
+  /* 1. Upright triangle (drag downwards): apex at top, base at bottom */
+  paint_document_begin_stroke (doc, 20.0, 20.0, triangle, settings);
+  paint_document_end_stroke (doc, 120.0, 120.0, triangle, settings);
+  read_pixel_rgba (doc, 30, 30, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (doc, 30, 110, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_true (paint_document_undo (doc));
+
+  /* 2. Upside-down triangle (drag upwards): flat base at top, apex at bottom */
+  paint_document_begin_stroke (doc, 20.0, 120.0, triangle, settings);
+  paint_document_end_stroke (doc, 120.0, 20.0, triangle, settings);
+  read_pixel_rgba (doc, 30, 30, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (doc, 110, 30, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (doc, 30, 110, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (doc, 70, 110, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_true (paint_document_undo (doc));
+
+  /* 3. Upright star (drag downwards): single point at top (90, 50), notch at bottom (90, 130) */
+  paint_document_begin_stroke (doc, 40.0, 40.0, star, settings);
+  paint_document_end_stroke (doc, 140.0, 140.0, star, settings);
+  read_pixel_rgba (doc, 90, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (doc, 90, 130, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_true (paint_document_undo (doc));
+
+  /* 4. Upside-down star (drag upwards & left): notch at top (90, 50), single point at bottom (90, 130) */
+  paint_document_begin_stroke (doc, 140.0, 140.0, star, settings);
+  paint_document_end_stroke (doc, 40.0, 40.0, star, settings);
+  read_pixel_rgba (doc, 90, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (doc, 90, 130, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_true (paint_document_undo (doc));
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -712,5 +778,6 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/shapes_outline_filled_snap_and_undo", test_shapes_outline_filled_snap_and_undo);
   g_test_add_func ("/canvas/transparent_png_open_edit_resize_and_save", test_transparent_png_open_edit_resize_and_save);
   g_test_add_func ("/canvas/transparent_brush_and_fill_tools", test_transparent_brush_and_fill_tools);
+  g_test_add_func ("/canvas/shapes_vertical_flip_triangle_and_star", test_shapes_vertical_flip_triangle_and_star);
   return g_test_run ();
 }
