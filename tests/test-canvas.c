@@ -757,8 +757,9 @@ test_shapes_vertical_flip_triangle_and_star (void)
   g_assert_cmpuint (b, ==, 255);
   g_assert_true (paint_document_undo (doc));
 
-  /* 5. Squashed outline star: round join avoids miter spikes/bevel jumps and undoes cleanly */
+  /* 5. Squashed outline star/triangle/diamond: round join avoids miter spikes/bevel jumps and undoes cleanly */
   PaintDocument *wide_doc = paint_document_new (400, 100);
+  const PaintTool *diamond = paint_tools_find ("shape-diamond");
   settings->shape_filled = FALSE;
   settings->size = 6.0;
   paint_document_begin_stroke (wide_doc, 50.0, 35.0, star, settings);
@@ -773,6 +774,26 @@ test_shapes_vertical_flip_triangle_and_star (void)
   read_pixel_rgba (wide_doc, 343, 45, &r, &g, &b, &a);
   g_assert_cmpuint (r, ==, 255);
   g_assert_cmpuint (b, ==, 255);
+
+  paint_document_begin_stroke (wide_doc, 50.0, 40.0, triangle, settings);
+  paint_document_end_stroke (wide_doc, 350.0, 60.0, triangle, settings);
+  read_pixel_rgba (wide_doc, 350, 60, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (wide_doc, 356, 60, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_true (paint_document_undo (wide_doc));
+
+  paint_document_begin_stroke (wide_doc, 50.0, 40.0, diamond, settings);
+  paint_document_end_stroke (wide_doc, 350.0, 60.0, diamond, settings);
+  read_pixel_rgba (wide_doc, 350, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (wide_doc, 356, 50, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_true (paint_document_undo (wide_doc));
   paint_document_free (wide_doc);
 
   paint_tool_settings_free (settings);

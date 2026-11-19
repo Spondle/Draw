@@ -778,17 +778,17 @@ shape_draw_preview (const PaintTool *tool,
     cairo_line_to (cr, bx + bw, y1);
     cairo_line_to (cr, bx, y1);
     cairo_close_path (cr);
-    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
   } else if (g_strcmp0 (tool->id, "shape-diamond") == 0) {
     cairo_move_to (cr, cx, by);
     cairo_line_to (cr, bx + bw, cy);
     cairo_line_to (cr, cx, by + bh);
     cairo_line_to (cr, bx, cy);
     cairo_close_path (cr);
-    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
   } else if (g_strcmp0 (tool->id, "shape-hexagon") == 0) {
     build_polygon_path (cr, cx, cy, rx, ry, 6, 0.0);
-    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
   } else if (g_strcmp0 (tool->id, "shape-star") == 0) {
     build_polygon_path (cr, cx, cy, rx, sry, 5, 0.38196601125);
     finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
