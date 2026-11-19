@@ -958,8 +958,10 @@ struct _PaintCanvas {
   gboolean ov_has_dirty_rect;
   cairo_rectangle_int_t ov_dirty_rect;
 
-  /* Repeating 16x16 checkerboard texture for transparent regions */
+  /* Viewport-sized cached checkerboard texture for transparent regions */
   GdkTexture *checker_texture;
+  int checker_w;
+  int checker_h;
 
   double zoom;
   gboolean has_hover;
@@ -1506,27 +1508,43 @@ paint_canvas_measure (GtkWidget *widget,
 }
 
 static GdkTexture *
-ensure_checker_texture (PaintCanvas *self)
+ensure_checker_texture (PaintCanvas *self, int req_w, int req_h)
 {
-  if (self->checker_texture)
+  if (self->checker_texture &&
+      self->checker_w >= req_w &&
+      self->checker_h >= req_h) {
     return self->checker_texture;
+  }
 
-  const int tile = 16;
+  int cw = MAX (self->checker_w, ((MAX (16, req_w) + 63) / 64) * 64);
+  int ch = MAX (self->checker_h, ((MAX (16, req_h) + 63) / 64) * 64);
+
   const int cell = 8;
-  uint32_t pixels[16 * 16];
   const uint32_t light = 0xFFF0F0F2U;
   const uint32_t dark = 0xFFD2D2D8U;
 
-  for (int y = 0; y < tile; y++) {
-    for (int x = 0; x < tile; x++) {
-      gboolean is_dark = (((x / cell) + (y / cell)) & 1) != 0;
-      pixels[y * tile + x] = is_dark ? dark : light;
-    }
+  gsize row_bytes = (gsize) cw * 4;
+  uint32_t *row_even = g_malloc (row_bytes);
+  uint32_t *row_odd = g_malloc (row_bytes);
+  for (int x = 0; x < cw; x++) {
+    gboolean dark_col = ((x / cell) & 1) != 0;
+    row_even[x] = dark_col ? dark : light;
+    row_odd[x] = dark_col ? light : dark;
   }
 
-  g_autoptr (GBytes) bytes = g_bytes_new (pixels, sizeof (pixels));
-  self->checker_texture = gdk_memory_texture_new (tile, tile, GDK_MEMORY_DEFAULT,
-                                                  bytes, (gsize) tile * 4);
+  unsigned char *pixels = g_malloc (row_bytes * (gsize) ch);
+  for (int y = 0; y < ch; y++) {
+    const uint32_t *src = (((y / cell) & 1) != 0) ? row_odd : row_even;
+    memcpy (pixels + (gsize) y * row_bytes, src, row_bytes);
+  }
+  g_free (row_even);
+  g_free (row_odd);
+
+  g_autoptr (GBytes) bytes = g_bytes_new_take (pixels, row_bytes * (gsize) ch);
+  g_clear_object (&self->checker_texture);
+  self->checker_texture = gdk_memory_texture_new (cw, ch, GDK_MEMORY_DEFAULT, bytes, row_bytes);
+  self->checker_w = cw;
+  self->checker_h = ch;
   return self->checker_texture;
 }
 
@@ -1554,13 +1572,19 @@ paint_canvas_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
   graphene_rect_t vis_rect = compute_visible_widget_rect (self);
 
   if (vis_rect.size.width > 0.0f && vis_rect.size.height > 0.0f) {
-    GdkTexture *checker = ensure_checker_texture (self);
-    graphene_rect_t tile_rect = GRAPHENE_RECT_INIT (0.0f, 0.0f, 16.0f, 16.0f);
-    gtk_snapshot_push_repeat (snapshot, &vis_rect, &tile_rect);
+    int tx = (int) floor ((double) vis_rect.origin.x / 16.0) * 16;
+    int ty = (int) floor ((double) vis_rect.origin.y / 16.0) * 16;
+    int req_w = MAX (16, (int) ceil ((double) (vis_rect.origin.x + vis_rect.size.width)) - tx);
+    int req_h = MAX (16, (int) ceil ((double) (vis_rect.origin.y + vis_rect.size.height)) - ty);
+    GdkTexture *checker = ensure_checker_texture (self, req_w, req_h);
+    gtk_snapshot_push_clip (snapshot, &vis_rect);
     gtk_snapshot_append_scaled_texture (snapshot,
                                         checker,
                                         GSK_SCALING_FILTER_NEAREST,
-                                        &tile_rect);
+                                        &GRAPHENE_RECT_INIT ((float) tx,
+                                                             (float) ty,
+                                                             (float) self->checker_w,
+                                                             (float) self->checker_h));
     gtk_snapshot_pop (snapshot);
   }
 
