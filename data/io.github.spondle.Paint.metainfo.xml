@@ -12,7 +12,8 @@
       and Ptyxis.
     </p>
     <ul>
-      <li>Smooth anti-aliased brush, eraser, and tolerance-aware flood fill tools</li>
+      <li>Smooth anti-aliased brush, line, shapes, eraser, and tolerance-aware flood fill tools</li>
+      <li>Full transparency support with checkerboard backdrop and transparent brush and fill tools</li>
       <li>Tabbed canvases with tab overview and drag-out window tear-off</li>
       <li>Automatic session restore preserving open tabs and unsaved drafts</li>
       <li>Touchscreen-friendly canvas with zoom, pan, and customizable defaults</li>
@@ -39,6 +40,18 @@
   </supports>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.0" date="2026-11-18">
+      <description>
+        <p>New drawing tools and full transparency support:</p>
+        <ul>
+          <li>Full alpha transparency support when opening, editing, resizing, and saving PNG and WebP images, with a checkerboard backdrop</li>
+          <li>New Transparency tool (Brush, Fill, and Clear to Transparent) for making parts of a drawing transparent</li>
+          <li>New Shapes tool with 8 shapes, outline and filled modes, and Shift proportion snapping</li>
+          <li>New Line tool with live preview and 45-degree Shift angle snapping</li>
+          <li>Quick Clear Canvas button in the floating toolbar</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-11-18">
       <description>
         <p>Performance, zoom, and touchscreen improvements:</p>
