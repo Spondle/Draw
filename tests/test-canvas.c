@@ -824,6 +824,57 @@ test_shape_tool_filled_icon_names (void)
   paint_tool_settings_free (settings);
 }
 
+static void
+test_block_arrow_outline_filled_and_undo (void)
+{
+  PaintDocument *doc = paint_document_new (200, 200);
+  PaintToolSettings *settings = paint_tool_settings_new ();
+  settings->color = (GdkRGBA) { 0.0f, 0.0f, 1.0f, 1.0f };
+  settings->size = 4.0;
+
+  const PaintTool *arrow = paint_tools_find ("shape-block-arrow");
+  g_assert_cmpstr (arrow->id, ==, "shape-block-arrow");
+  g_assert_true (arrow->is_shape);
+
+  guint8 r, g, b, a;
+
+  /* 1. Outline block arrow: hollow center, colored shaft edge & wing tip, undo restores */
+  settings->shape_filled = FALSE;
+  paint_document_begin_stroke (doc, 20.0, 100.0, arrow, settings);
+  paint_document_end_stroke (doc, 120.0, 100.0, arrow, settings);
+  read_pixel_rgba (doc, 50, 100, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (doc, 50, 90, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (doc, 82, 74, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 82, 74, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+
+  /* 2. Filled block arrow: interior of shaft and head are colored, undo restores */
+  settings->shape_filled = TRUE;
+  paint_document_begin_stroke (doc, 20.0, 100.0, arrow, settings);
+  paint_document_end_stroke (doc, 120.0, 100.0, arrow, settings);
+  read_pixel_rgba (doc, 50, 100, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (doc, 95, 100, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_true (paint_document_undo (doc));
+  read_pixel_rgba (doc, 50, 100, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+
+  paint_tool_settings_free (settings);
+  paint_document_free (doc);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -843,5 +894,6 @@ main (int argc, char **argv)
   g_test_add_func ("/canvas/transparent_brush_and_fill_tools", test_transparent_brush_and_fill_tools);
   g_test_add_func ("/canvas/shapes_vertical_flip_triangle_and_star", test_shapes_vertical_flip_triangle_and_star);
   g_test_add_func ("/canvas/shape_tool_filled_icon_names", test_shape_tool_filled_icon_names);
+  g_test_add_func ("/canvas/block_arrow_outline_filled_and_undo", test_block_arrow_outline_filled_and_undo);
   return g_test_run ();
 }

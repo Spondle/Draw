@@ -1088,7 +1088,7 @@ build_shapes_popover (PaintCanvasPage *self)
     g_signal_connect (btn, "toggled", G_CALLBACK (on_tool_toggled), self);
     g_hash_table_insert (self->tool_buttons, (gpointer) tools[i].id, btn);
 
-    gtk_grid_attach (GTK_GRID (grid), btn, idx % 4, idx / 4, 1, 1);
+    gtk_grid_attach (GTK_GRID (grid), btn, idx % 3, idx / 3, 1, 1);
     idx++;
   }
 

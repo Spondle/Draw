@@ -26,5 +26,7 @@
     <file>icons/scalable/actions/tool-shape-star-filled-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-arrow-symbolic.svg</file>
     <file>icons/scalable/actions/tool-shape-arrow-filled-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-block-arrow-symbolic.svg</file>
+    <file>icons/scalable/actions/tool-shape-block-arrow-filled-symbolic.svg</file>
   </gresource>
 </gresources>

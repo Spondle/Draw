@@ -674,6 +674,33 @@ arrow_compute_head (double len,
 }
 
 static void
+build_block_arrow_path (cairo_t *cr,
+                        double x0,
+                        double y0,
+                        double x1,
+                        double y1,
+                        double ux,
+                        double uy,
+                        double head_len,
+                        double wing_w,
+                        double shaft_w)
+{
+  double nx = -uy;
+  double ny = ux;
+  double hx = x1 - ux * head_len;
+  double hy = y1 - uy * head_len;
+
+  cairo_move_to (cr, x0 + nx * shaft_w, y0 + ny * shaft_w);
+  cairo_line_to (cr, hx + nx * shaft_w, hy + ny * shaft_w);
+  cairo_line_to (cr, hx + nx * wing_w, hy + ny * wing_w);
+  cairo_line_to (cr, x1, y1);
+  cairo_line_to (cr, hx - nx * wing_w, hy - ny * wing_w);
+  cairo_line_to (cr, hx - nx * shaft_w, hy - ny * shaft_w);
+  cairo_line_to (cr, x0 - nx * shaft_w, y0 - ny * shaft_w);
+  cairo_close_path (cr);
+}
+
+static void
 shape_draw_arrow (cairo_t *cr,
                   double x0,
                   double y0,
@@ -696,22 +723,15 @@ shape_draw_arrow (cairo_t *cr,
 
   double head_len, wing_w;
   arrow_compute_head (len, settings, &head_len, &wing_w);
-  double hx = x1 - ux * head_len;
-  double hy = y1 - uy * head_len;
 
-  configure_brush_context (cr, settings);
   if (settings->shape_filled) {
     double shaft_w = MAX (2.0, MIN (wing_w * 0.42, settings->size * 0.75));
-    cairo_move_to (cr, x0 + nx * shaft_w, y0 + ny * shaft_w);
-    cairo_line_to (cr, hx + nx * shaft_w, hy + ny * shaft_w);
-    cairo_line_to (cr, hx + nx * wing_w, hy + ny * wing_w);
-    cairo_line_to (cr, x1, y1);
-    cairo_line_to (cr, hx - nx * wing_w, hy - ny * wing_w);
-    cairo_line_to (cr, hx - nx * shaft_w, hy - ny * shaft_w);
-    cairo_line_to (cr, x0 - nx * shaft_w, y0 - ny * shaft_w);
-    cairo_close_path (cr);
-    cairo_fill (cr);
+    build_block_arrow_path (cr, x0, y0, x1, y1, ux, uy, head_len, wing_w, shaft_w);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
   } else {
+    double hx = x1 - ux * head_len;
+    double hy = y1 - uy * head_len;
+    configure_brush_context (cr, settings);
     cairo_set_line_width (cr, MAX (1.0, settings->size));
     cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
     cairo_set_line_join (cr, CAIRO_LINE_JOIN_ROUND);
@@ -727,6 +747,39 @@ shape_draw_arrow (cairo_t *cr,
 }
 
 static void
+block_arrow_compute_dims (double len,
+                          double *out_head_len,
+                          double *out_wing_w,
+                          double *out_shaft_w)
+{
+  *out_head_len = len * 0.38;
+  *out_wing_w = len * 0.26;
+  *out_shaft_w = len * 0.10;
+}
+
+static void
+shape_draw_block_arrow (cairo_t *cr,
+                        double x0,
+                        double y0,
+                        double x1,
+                        double y1,
+                        const PaintToolSettings *settings)
+{
+  double dx = x1 - x0;
+  double dy = y1 - y0;
+  double len = hypot (dx, dy);
+  if (len < 1e-6) {
+    draw_straight_line (cr, x0, y0, x1, y1, settings);
+    return;
+  }
+
+  double head_len, wing_w, shaft_w;
+  block_arrow_compute_dims (len, &head_len, &wing_w, &shaft_w);
+  build_block_arrow_path (cr, x0, y0, x1, y1, dx / len, dy / len, head_len, wing_w, shaft_w);
+  finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
+}
+
+static void
 shape_draw_preview (const PaintTool *tool,
                     cairo_t *cr,
                     double x0,
@@ -737,6 +790,10 @@ shape_draw_preview (const PaintTool *tool,
 {
   if (g_strcmp0 (tool->id, "shape-arrow") == 0) {
     shape_draw_arrow (cr, x0, y0, x1, y1, settings);
+    return;
+  }
+  if (g_strcmp0 (tool->id, "shape-block-arrow") == 0) {
+    shape_draw_block_arrow (cr, x0, y0, x1, y1, settings);
     return;
   }
 
@@ -829,6 +886,28 @@ arrow_get_bounds (const PaintTool *tool G_GNUC_UNUSED,
   double len = hypot (x1 - x0, y1 - y0);
   double head_len, wing_w;
   arrow_compute_head (len, settings, &head_len, &wing_w);
+  double pad = wing_w + MAX (2.0, settings->size);
+  *out_x0 = MIN (x0, x1) - pad;
+  *out_y0 = MIN (y0, y1) - pad;
+  *out_x1 = MAX (x0, x1) + pad;
+  *out_y1 = MAX (y0, y1) + pad;
+}
+
+static void
+block_arrow_get_bounds (const PaintTool *tool G_GNUC_UNUSED,
+                        double x0,
+                        double y0,
+                        double x1,
+                        double y1,
+                        const PaintToolSettings *settings,
+                        double *out_x0,
+                        double *out_y0,
+                        double *out_x1,
+                        double *out_y1)
+{
+  double len = hypot (x1 - x0, y1 - y0);
+  double head_len, wing_w, shaft_w;
+  block_arrow_compute_dims (len, &head_len, &wing_w, &shaft_w);
   double pad = wing_w + MAX (2.0, settings->size);
   *out_x0 = MIN (x0, x1) - pad;
   *out_y0 = MIN (y0, y1) - pad;
@@ -1020,6 +1099,21 @@ static const PaintTool BUILTIN_TOOLS[] = {
     .draw_preview = shape_draw_preview,
     .snap_point = line_snap_point,
     .get_bounds = arrow_get_bounds,
+  },
+  {
+    .id = "shape-block-arrow",
+    .name = "Block Arrow",
+    .icon_name = "tool-shape-block-arrow-symbolic",
+    .filled_icon_name = "tool-shape-block-arrow-filled-symbolic",
+    .tooltip = "Block Arrow · Hold Shift to snap angle",
+    .uses_brush_size = TRUE,
+    .is_shape = TRUE,
+    .begin_stroke = line_begin_stroke,
+    .continue_stroke = fill_noop,
+    .end_stroke = line_end_stroke,
+    .draw_preview = shape_draw_preview,
+    .snap_point = line_snap_point,
+    .get_bounds = block_arrow_get_bounds,
   },
 };
 
