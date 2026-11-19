@@ -757,6 +757,24 @@ test_shapes_vertical_flip_triangle_and_star (void)
   g_assert_cmpuint (b, ==, 255);
   g_assert_true (paint_document_undo (doc));
 
+  /* 5. Squashed outline star: round join avoids miter spikes/bevel jumps and undoes cleanly */
+  PaintDocument *wide_doc = paint_document_new (400, 100);
+  settings->shape_filled = FALSE;
+  settings->size = 6.0;
+  paint_document_begin_stroke (wide_doc, 50.0, 35.0, star, settings);
+  paint_document_end_stroke (wide_doc, 350.0, 65.0, star, settings);
+  read_pixel_rgba (wide_doc, 343, 45, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 0);
+  g_assert_cmpuint (b, ==, 255);
+  read_pixel_rgba (wide_doc, 348, 45, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  g_assert_true (paint_document_undo (wide_doc));
+  read_pixel_rgba (wide_doc, 343, 45, &r, &g, &b, &a);
+  g_assert_cmpuint (r, ==, 255);
+  g_assert_cmpuint (b, ==, 255);
+  paint_document_free (wide_doc);
+
   paint_tool_settings_free (settings);
   paint_document_free (doc);
 }

@@ -791,7 +791,7 @@ shape_draw_preview (const PaintTool *tool,
     finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
   } else if (g_strcmp0 (tool->id, "shape-star") == 0) {
     build_polygon_path (cr, cx, cy, rx, sry, 5, 0.38196601125);
-    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_MITER);
+    finish_shape_path (cr, settings, CAIRO_LINE_JOIN_ROUND);
   }
 }
 
