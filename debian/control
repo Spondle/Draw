@@ -1,0 +1,31 @@
+Source: paint
+Section: graphics
+Priority: optional
+Maintainer: spondle <gordonumolu@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ appstream,
+ desktop-file-utils,
+ libadwaita-1-dev (>= 1.6),
+ libcairo2-dev,
+ libgtk-4-dev (>= 4.12),
+ meson,
+ pkgconf
+Standards-Version: 4.7.0
+Homepage: https://github.com/Spondle/Draw
+Vcs-Git: https://github.com/Spondle/Draw.git
+Vcs-Browser: https://github.com/Spondle/Draw
+Rules-Requires-Root: no
+
+Package: paint
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ hicolor-icon-theme
+Recommends:
+ webp-pixbuf-loader
+Description: Clean GNOME Paint application built with GTK 4 and Libadwaita
+ Paint is a fast, distraction-free raster drawing and painting application
+ built with GTK 4, Libadwaita, and Cairo in the style of GNOME Text Editor
+ and Ptyxis.

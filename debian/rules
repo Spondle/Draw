@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --buildsystem=meson
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	dh_auto_test
+	desktop-file-validate data/io.github.spondle.Paint.desktop
+	appstreamcli validate --no-net data/io.github.spondle.Paint.metainfo.xml
+endif

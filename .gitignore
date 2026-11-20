@@ -1,4 +1,14 @@
 /build/
 /.flatpak-builder/
 *.flatpak
+*.deb
+*.ddeb
+*.buildinfo
+*.changes
+/debian/.debhelper/
+/debian/files
+/debian/paint/
+/debian/*.debhelper.log
+/debian/*.substvars
+
 

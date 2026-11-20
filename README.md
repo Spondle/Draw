@@ -41,6 +41,17 @@ meson install -C build
    sudo dnf install paint
    ```
 
+### Debian / Ubuntu (`.deb` package)
+
+On Debian 13+ or Ubuntu 24.10+ (requires Libadwaita ≥ 1.6):
+
+```bash
+sudo apt install debhelper dpkg-dev meson pkgconf appstream desktop-file-utils \
+  libgtk-4-dev libadwaita-1-dev libcairo2-dev
+dpkg-buildpackage -us -uc -b
+sudo apt install ../paint_*.deb
+```
+
 ## Architecture
 
 - [`meson.build`](meson.build) — Meson build configuration, `GResource` bundling, and install targets
