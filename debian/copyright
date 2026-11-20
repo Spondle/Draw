@@ -3,11 +3,11 @@ Upstream-Name: Paint
 Source: https://github.com/Spondle/Draw
 
 Files: *
-Copyright: 2026 spondle <gordonumolu@gmail.com>
+Copyright: 2026 spondle
 License: GPL-3.0-or-later
 
 Files: data/io.github.spondle.Paint.metainfo.xml
-Copyright: 2026 spondle <gordonumolu@gmail.com>
+Copyright: 2026 spondle
 License: CC0-1.0
 
 License: GPL-3.0-or-later

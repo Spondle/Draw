@@ -46,15 +46,15 @@ appstreamcli validate --no-net %{buildroot}%{_datadir}/metainfo/io.github.spondl
 %{_datadir}/icons/hicolor/symbolic/apps/io.github.spondle.Paint-symbolic.svg
 
 %changelog
-* Wed Nov 18 2026 spondle <gordonumolu@gmail.com> - 0.2.0-1
+* Wed Nov 18 2026 spondle <noreply@example.invalid> - 0.2.0-1
 - Add full transparency support for PNG and WebP images with a checkerboard canvas backdrop
 - Add Transparency tool (Brush, Fill, and Clear to Transparent)
 - Add Line tool and Shapes tool (8 shapes with outline/filled modes and Shift snapping)
 - Add Clear Canvas button to the floating toolbar
 
-* Wed Nov 18 2026 spondle <gordonumolu@gmail.com> - 0.1.1-1
+* Wed Nov 18 2026 spondle <noreply@example.invalid> - 0.1.1-1
 - Improve large-canvas drawing and zoom performance without tile seams
 - Add touchscreen pinch-to-zoom and focal-point zoom anchoring
 
-* Tue Nov 17 2026 spondle <gordonumolu@gmail.com> - 0.1.0-1
+* Tue Nov 17 2026 spondle <noreply@example.invalid> - 0.1.0-1
 - Initial release

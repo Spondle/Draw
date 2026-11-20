@@ -7,17 +7,17 @@ paint (0.2.0-1) unstable; urgency=medium
     - Add Clear Canvas button to the floating toolbar
     - Add Debian packaging
 
- -- spondle <gordonumolu@gmail.com>  Wed, 18 Nov 2026 12:00:00 -0500
+ -- spondle <noreply@example.invalid>  Wed, 18 Nov 2026 12:00:00 -0500
 
 paint (0.1.1-1) unstable; urgency=medium
 
   * Improve large-canvas drawing and zoom performance
   * Add touchscreen pinch-to-zoom and focal-point zoom anchoring
 
- -- spondle <gordonumolu@gmail.com>  Wed, 18 Nov 2026 09:00:00 -0500
+ -- spondle <noreply@example.invalid>  Wed, 18 Nov 2026 09:00:00 -0500
 
 paint (0.1.0-1) unstable; urgency=medium
 
   * Initial release
 
- -- spondle <gordonumolu@gmail.com>  Tue, 17 Nov 2026 12:00:00 -0500
+ -- spondle <noreply@example.invalid>  Tue, 17 Nov 2026 12:00:00 -0500

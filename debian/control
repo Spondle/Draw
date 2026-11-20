@@ -1,7 +1,7 @@
 Source: paint
 Section: graphics
 Priority: optional
-Maintainer: spondle <gordonumolu@gmail.com>
+Maintainer: spondle <noreply@example.invalid>
 Build-Depends:
  debhelper-compat (= 13),
  appstream,
